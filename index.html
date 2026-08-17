@@ -72,8 +72,9 @@
   .entete-icone{ width:26px; height:26px; display:block; }
   .entete-souscription{ font-size:12.5px; color:var(--ink-soft); margin:2px 0 0; font-style:italic; font-family:var(--font-display); }
 
-  .selecteur-periode{ display:flex; gap:8px; padding:10px 20px 6px; justify-content:center; flex-shrink:0; }
-  .chip-periode{ font-family:var(--font-body); font-size:12.5px; padding:7px 14px; border-radius:999px; border:1px solid var(--line); background:var(--paper-raised); color:var(--ink-soft); cursor:pointer; }
+  .selecteur-periode{ display:flex; gap:8px; padding:10px 20px 6px; justify-content:center; flex-shrink:0; overflow-x:auto; scrollbar-width:none; }
+  .selecteur-periode::-webkit-scrollbar{ display:none; }
+  .chip-periode{ font-family:var(--font-body); font-size:12.5px; padding:7px 14px; border-radius:999px; border:1px solid var(--line); background:var(--paper-raised); color:var(--ink-soft); cursor:pointer; white-space:nowrap; flex-shrink:0; }
   .chip-periode.actif{ background:var(--green-deep); border-color:var(--green-deep); color:var(--paper); }
 
   .contenu{ flex:1; padding:8px 20px 110px; overflow-y:auto; -webkit-overflow-scrolling:touch; }
@@ -83,6 +84,7 @@
   .hero-solde{ text-align:center; padding:6px 0 20px; }
   .eyebrow{ font-family:var(--font-body); font-size:12px; letter-spacing:0.14em; text-transform:uppercase; color:var(--ink-soft); margin:0 0 6px; }
   .hero-chiffre{ font-family:var(--font-display); font-size:42px; font-weight:600; margin:0; font-variant-numeric:tabular-nums; letter-spacing:-0.01em; }
+  .hero-solde-date{ font-size:11.5px; color:var(--ink-soft); margin:2px 0 0; }
   .ink-credit{ color:var(--green-credit); }
   .ink-debit{ color:var(--red-debit); }
   .double-regle{ width:120px; height:9px; margin:10px auto 0; position:relative; }
@@ -117,6 +119,8 @@
   .ligne-mvt-corps{ flex:1; min-width:0; display:flex; flex-direction:column; gap:2px; }
   .ligne-mvt-titre{ font-size:14.5px; color:var(--ink); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .ligne-mvt-sous{ font-size:12px; color:var(--ink-soft); }
+  .marque-avenir{ color:var(--gold-rule); font-weight:500; }
+  .marque-recurrent{ color:var(--ink-soft); }
   .ligne-mvt-montant{ font-family:var(--font-mono); font-size:14.5px; font-weight:500; font-variant-numeric:tabular-nums; flex-shrink:0; }
 
   .filtre-cat-conteneur{ margin-bottom:10px; }
@@ -171,6 +175,18 @@
   .actions-donnees .bouton-secondaire{ margin-top:0; }
   .bouton-danger{ display:block; width:100%; padding:11px; border-radius:10px; border:1px solid var(--red-debit); background:none; color:var(--red-debit); font-size:13.5px; font-weight:500; cursor:pointer; }
 
+  .liste-archives{ display:flex; flex-direction:column; gap:8px; margin-bottom:10px; }
+  .ligne-archive{ background:var(--paper); border:1px solid var(--line); border-radius:10px; padding:10px 12px; display:flex; align-items:center; justify-content:space-between; gap:10px; }
+  .ligne-archive--archivee{ flex-direction:column; align-items:stretch; }
+  .ligne-archive-entete{ display:flex; align-items:center; justify-content:space-between; gap:10px; background:none; border:none; padding:0; width:100%; cursor:pointer; font-family:inherit; text-align:left; }
+  .ligne-archive-annee{ font-family:var(--font-display); font-size:14.5px; font-weight:600; color:var(--ink); }
+  .etiquette-archivee{ font-family:var(--font-body); font-size:10px; font-weight:500; color:var(--ink-soft); background:var(--stripe); padding:2px 7px; border-radius:999px; margin-left:4px; }
+  .ligne-archive-info{ font-family:var(--font-mono); font-size:12px; color:var(--ink-soft); flex-shrink:0; font-variant-numeric:tabular-nums; }
+  .ligne-archive--archivee .bouton-secondaire{ margin-top:10px; }
+  .detail-archive{ margin-top:10px; border-top:1px solid var(--line); padding-top:10px; }
+  .detail-archive .liste-mvts{ box-shadow:none; }
+  .detail-archive .ligne-mvt{ cursor:default; pointer-events:none; }
+
   .etat-vide{ text-align:center; padding:40px 20px; color:var(--ink-soft); }
   .etat-vide p{ margin:4px 0; }
   .etat-vide-sous{ font-size:13px; }
@@ -201,6 +217,8 @@
   .bouton-icone{ background:none; border:none; font-size:16px; color:var(--ink-soft); cursor:pointer; padding:6px; }
 
   .form-transaction{ display:flex; flex-direction:column; gap:14px; }
+  .ligne-case{ display:flex; align-items:center; gap:9px; font-size:13.5px; color:var(--ink); cursor:pointer; }
+  .ligne-case input[type="checkbox"]{ width:18px; height:18px; flex-shrink:0; accent-color:var(--green-deep); }
   .segment-type{ display:flex; border:1px solid var(--line); border-radius:10px; overflow:hidden; }
   .segment-type button{ flex:1; padding:10px; background:var(--paper-raised); border:none; font-size:14px; color:var(--ink-soft); cursor:pointer; }
   .segment-type button.actif{ background:var(--green-deep); color:var(--paper); }
@@ -254,6 +272,7 @@
   <div id="barre-periode" class="selecteur-periode">
     <button class="chip-periode" data-periode="mois">Ce mois</button>
     <button class="chip-periode" data-periode="mois-dernier">Mois dernier</button>
+    <button class="chip-periode" data-periode="annee">Cette année</button>
     <button class="chip-periode" data-periode="tout">Tout</button>
   </div>
 
@@ -318,6 +337,10 @@
       <label class="etiquette-champ">Date
         <input type="date" id="input-date" class="input-texte" required>
       </label>
+      <label class="ligne-case" id="ligne-champ-recurrent">
+        <input type="checkbox" id="input-recurrent">
+        <span>Mouvement récurrent (mensuel, jusqu'à fin d'année)</span>
+      </label>
       <button type="submit" class="bouton-principal">Enregistrer</button>
       <button type="button" id="btn-supprimer-transaction" class="bouton-danger" style="display:none">Supprimer ce mouvement</button>
     </form>
@@ -359,13 +382,15 @@
     objectifEpargne: 15,
     soldeInitial: 0,
     periode: 'mois',
-    filtreCategorie: 'toutes'
+    filtreCategorie: 'toutes',
+    archives: [] // années civiles archivées : [{annee, transactions:[...], soldeNet, dateArchivage}]
   };
   // Séparé de `state` à dessein : ne doit jamais se retrouver dans un export JSON/Excel partagé.
   var identifiantsCloud = { masterKey: '', binId: '' };
 
   var vueActive = 'dashboard';
   var VUES_AVEC_PERIODE = ['dashboard','repartition','optimisation'];
+  var anneeArchiveOuverte = null; // état d'affichage (repliable) du détail d'une archive dans Réglages
 
   // ---------- Utilitaires ----------
   function genId(){ return 'id-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2,8); }
@@ -376,9 +401,16 @@
   function formatMontant(n){ return formateurMontant.format(n||0); }
   function formatPct(n){ return (Math.round(n*10)/10).toLocaleString('fr-FR', {minimumFractionDigits:0, maximumFractionDigits:1}) + '%'; }
   function formatDateAffichage(dateStr){ var d = new Date(dateStr+'T00:00:00'); return d.toLocaleDateString('fr-FR', {day:'2-digit', month:'short', year:'numeric'}); }
+  // Date du jour au format YYYY-MM-DD en heure LOCALE (contrairement à toISOString() qui est en UTC
+  // et peut donc désigner encore « hier » en soirée pour un fuseau en avance sur UTC comme la France).
+  function dateLocaleISO(d){
+    d = d || new Date();
+    return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+  }
   function libellePeriode(){
     if(state.periode==='mois') return 'ce mois-ci';
     if(state.periode==='mois-dernier') return 'le mois dernier';
+    if(state.periode==='annee') return 'cette année';
     return 'toute la période';
   }
   function trierParDateDesc(a,b){
@@ -458,6 +490,7 @@
         if(typeof data.objectifEpargne === 'number') state.objectifEpargne = data.objectifEpargne;
         if(typeof data.soldeInitial === 'number') state.soldeInitial = data.soldeInitial;
         if(typeof data.periode === 'string') state.periode = data.periode;
+        if(Array.isArray(data.archives)) state.archives = data.archives;
         return false;
       }
       return true;
@@ -484,6 +517,9 @@
     if(state.periode === 'mois-dernier'){
       return { debut:new Date(now.getFullYear(), now.getMonth()-1, 1), fin:new Date(now.getFullYear(), now.getMonth(), 0, 23,59,59) };
     }
+    if(state.periode === 'annee'){
+      return { debut:new Date(now.getFullYear(), 0, 1), fin:new Date(now.getFullYear(), 11, 31, 23,59,59) };
+    }
     return { debut:new Date(2000,0,1), fin:new Date(2100,0,1) };
   }
   function transactionsPeriode(){
@@ -491,7 +527,14 @@
     return state.transactions.filter(function(t){ var d = new Date(t.date+'T12:00:00'); return d>=r.debut && d<=r.fin; });
   }
   function soldeGlobal(){
-    return state.transactions.reduce(function(acc,t){ return acc + (t.type==='entree'? t.montant : -t.montant); }, state.soldeInitial||0);
+    // Le solde est calculé à date : les mouvements saisis avec une date future (ex. charges
+    // récurrentes projetées, virement planifié) ne sont pas encore réalisés et ne doivent
+    // donc pas impacter le solde affiché — ils restent visibles dans Mouvements/Répartition.
+    var aujourdhui = dateLocaleISO();
+    return state.transactions.reduce(function(acc,t){
+      if(t.date > aujourdhui) return acc;
+      return acc + (t.type==='entree'? t.montant : -t.montant);
+    }, state.soldeInitial||0);
   }
   function totauxPeriode(){
     var txs = transactionsPeriode();
@@ -519,6 +562,62 @@
     var t = totauxPeriode();
     if(t.entrees<=0) return 0;
     return (t.entrees - t.sorties) / t.entrees * 100;
+  }
+
+  // ---------- Mouvements récurrents ----------
+  // Génère, à partir d'un mouvement de base, une occurrence par mois suivant (même jour du mois,
+  // ramené au dernier jour si le mois est plus court) jusqu'à décembre inclus de son année civile.
+  // Ces occurrences futures s'intègrent naturellement à Répartition/Optimisation (période « Cette
+  // année » ou « Tout ») mais n'impactent pas le solde tant que leur date n'est pas atteinte.
+  function genererOccurrencesRecurrentes(base){
+    var d0 = new Date(base.date+'T00:00:00');
+    var jourCible = d0.getDate();
+    var anneeCible = d0.getFullYear();
+    var occurrences = [];
+    for(var mois = d0.getMonth()+1; mois <= 11; mois++){
+      var dernierJourMois = new Date(anneeCible, mois+1, 0).getDate();
+      var jour = Math.min(jourCible, dernierJourMois);
+      var dateOccurrence = anneeCible + '-' + String(mois+1).padStart(2,'0') + '-' + String(jour).padStart(2,'0');
+      occurrences.push({
+        id: genId(), type: base.type, montant: base.montant, categorie: base.categorie,
+        description: base.description, date: dateOccurrence,
+        recurrent: true, recurrenceId: base.recurrenceId
+      });
+    }
+    return occurrences;
+  }
+
+  // ---------- Archivage annuel ----------
+  function anneeDe(t){ return parseInt(t.date.slice(0,4), 10); }
+  function anneesDisponiblesPourArchivage(){
+    var anneeActuelle = new Date().getFullYear();
+    var dejaArchivees = state.archives.map(function(a){ return a.annee; });
+    var presentes = {};
+    state.transactions.forEach(function(t){
+      var a = anneeDe(t);
+      if(a < anneeActuelle && dejaArchivees.indexOf(a)===-1) presentes[a] = true;
+    });
+    return Object.keys(presentes).map(Number).sort(function(a,b){return a-b;});
+  }
+  function archiverAnnee(annee){
+    var aArchiver = state.transactions.filter(function(t){ return anneeDe(t)===annee; });
+    if(aArchiver.length===0) return;
+    var soldeNet = aArchiver.reduce(function(acc,t){ return acc + (t.type==='entree'? t.montant : -t.montant); }, 0);
+    state.transactions = state.transactions.filter(function(t){ return anneeDe(t)!==annee; });
+    // Le solde initial absorbe l'effet net de l'année archivée : le solde global reste exact
+    // sans avoir besoin de recharger les transactions archivées à chaque calcul.
+    state.soldeInitial = (state.soldeInitial||0) + soldeNet;
+    state.archives.push({annee:annee, transactions:aArchiver, soldeNet:soldeNet, dateArchivage:dateLocaleISO()});
+    state.archives.sort(function(a,b){ return a.annee - b.annee; });
+  }
+  function desarchiverAnnee(annee){
+    var idx = -1;
+    for(var i=0;i<state.archives.length;i++){ if(state.archives[i].annee===annee){ idx=i; break; } }
+    if(idx===-1) return;
+    var archive = state.archives[idx];
+    state.transactions = state.transactions.concat(archive.transactions);
+    state.soldeInitial = (state.soldeInitial||0) - archive.soldeNet;
+    state.archives.splice(idx,1);
   }
 
   // ---------- Graphique donut SVG ----------
@@ -569,15 +668,19 @@
     if(txs.length===0){
       return '<div class="etat-vide"><p>Le grand livre est vierge.</p><p class="etat-vide-sous">Notez votre première entrée ou sortie pour commencer.</p></div>';
     }
+    var aujourdhui = dateLocaleISO();
     return '<div class="liste-mvts">' + txs.map(function(t){
       var cat = getCategorie(t.categorie, t.type);
       var signe = t.type==='entree' ? '+' : '-';
       var classe = t.type==='entree' ? 'ink-credit' : 'ink-debit';
+      var marques = '';
+      if(t.date > aujourdhui) marques += ' · <span class="marque-avenir">à venir</span>';
+      if(t.recurrent) marques += ' <span class="marque-recurrent" title="Mouvement récurrent">↻</span>';
       return '<button class="ligne-mvt" data-id="'+t.id+'" type="button">' +
         '<span class="ligne-mvt-tick" style="background:'+cat.couleur+'"></span>' +
         '<span class="ligne-mvt-corps">' +
           '<span class="ligne-mvt-titre">'+escapeHtml(t.description || cat.nom)+'</span>' +
-          '<span class="ligne-mvt-sous">'+escapeHtml(cat.nom)+' · '+formatDateAffichage(t.date)+'</span>' +
+          '<span class="ligne-mvt-sous">'+escapeHtml(cat.nom)+' · '+formatDateAffichage(t.date)+marques+'</span>' +
         '</span>' +
         '<span class="ligne-mvt-montant '+classe+'">'+signe+formatMontant(t.montant)+'</span>' +
       '</button>';
@@ -600,6 +703,7 @@
       '<div class="hero-solde">' +
         '<p class="eyebrow">Solde du grand livre</p>' +
         '<p class="hero-chiffre '+(soldePositif?'ink-credit':'ink-debit')+'">'+formatMontant(solde)+'</p>' +
+        '<p class="hero-solde-date">au '+formatDateAffichage(dateLocaleISO())+'</p>' +
         '<div class="double-regle"></div>' +
       '</div>' +
       '<div class="grille-stats">' +
@@ -767,6 +871,39 @@
     renderReglages();
     toast('Catégorie supprimée');
   }
+  function renderBlocArchives(){
+    var aArchiver = anneesDisponiblesPourArchivage();
+    var archives = state.archives.slice().sort(function(a,b){ return b.annee - a.annee; });
+    var html = '<div class="bloc-reglage"><h3 class="sous-titre">Archives annuelles</h3>' +
+      '<p class="aide-texte">Archivez une année civile terminée pour alléger le grand livre : le solde reste exact, le détail reste consultable ici.</p>';
+    if(aArchiver.length===0 && archives.length===0){
+      html += '<p class="aide-texte">Aucune année à archiver pour le moment.</p>';
+    }
+    if(aArchiver.length>0){
+      html += '<div class="liste-archives">' + aArchiver.map(function(annee){
+        return '<div class="ligne-archive">' +
+          '<span class="ligne-archive-annee">'+annee+'</span>' +
+          '<button class="bouton-secondaire" type="button" data-action="archiver" data-annee="'+annee+'" style="width:auto">Archiver</button>' +
+        '</div>';
+      }).join('') + '</div>';
+    }
+    if(archives.length>0){
+      html += '<div class="liste-archives">' + archives.map(function(a){
+        var ouverte = anneeArchiveOuverte===a.annee;
+        var signe = a.soldeNet>=0 ? '+' : '';
+        return '<div class="ligne-archive ligne-archive--archivee">' +
+          '<button type="button" class="ligne-archive-entete" data-action="basculer-archive" data-annee="'+a.annee+'">' +
+            '<span class="ligne-archive-annee">'+a.annee+' <span class="etiquette-archivee">archivée</span></span>' +
+            '<span class="ligne-archive-info">'+a.transactions.length+' mvt · '+signe+formatMontant(a.soldeNet)+'</span>' +
+          '</button>' +
+          (ouverte ? ('<div class="detail-archive">' + renderListeMouvements(a.transactions.slice().sort(trierParDateDesc)) + '</div>') : '') +
+          '<button class="bouton-secondaire" type="button" data-action="desarchiver" data-annee="'+a.annee+'">Désarchiver '+a.annee+'</button>' +
+        '</div>';
+      }).join('') + '</div>';
+    }
+    html += '</div>';
+    return html;
+  }
   function renderReglages(){
     var el = document.getElementById('vue-reglages');
     var sommeObjectifs = state.categoriesSortie.reduce(function(a,c){return a+c.objectif;},0);
@@ -798,6 +935,7 @@
         '<input type="file" id="input-import-fichier" accept="application/json" style="display:none">' +
         '<button class="bouton-danger" type="button" id="btn-effacer-tout">Effacer toutes les données</button>' +
       '</div>' +
+      renderBlocArchives() +
       '<div class="bloc-reglage"><h3 class="sous-titre">Synchronisation cloud (JSONBin)</h3>' +
         '<p class="aide-texte">Pour retrouver vos données sur un autre appareil. Compte gratuit sur jsonbin.io, puis collez votre clé X-Master-Key ci-dessous.</p>' +
         '<label class="etiquette-champ">Clé X-Master-Key' +
@@ -836,6 +974,33 @@
     document.getElementById('btn-import').addEventListener('click', function(){ document.getElementById('input-import-fichier').click(); });
     document.getElementById('input-import-fichier').addEventListener('change', importerJSON);
     document.getElementById('btn-effacer-tout').addEventListener('click', effacerToutesLesDonnees);
+    el.querySelectorAll('[data-action="archiver"]').forEach(function(btn){
+      btn.addEventListener('click', function(){
+        var annee = parseInt(btn.dataset.annee, 10);
+        if(!confirm('Archiver l\'année '+annee+' ? Ses mouvements seront retirés de la liste principale mais resteront consultables dans les archives ; le solde reste exact.')) return;
+        archiverAnnee(annee);
+        sauvegarder();
+        renderReglages();
+        toast('Année '+annee+' archivée');
+      });
+    });
+    el.querySelectorAll('[data-action="desarchiver"]').forEach(function(btn){
+      btn.addEventListener('click', function(){
+        var annee = parseInt(btn.dataset.annee, 10);
+        if(!confirm('Désarchiver l\'année '+annee+' ? Ses mouvements seront réintégrés dans le grand livre.')) return;
+        desarchiverAnnee(annee);
+        sauvegarder();
+        renderReglages();
+        toast('Année '+annee+' désarchivée');
+      });
+    });
+    el.querySelectorAll('[data-action="basculer-archive"]').forEach(function(btn){
+      btn.addEventListener('click', function(){
+        var annee = parseInt(btn.dataset.annee, 10);
+        anneeArchiveOuverte = (anneeArchiveOuverte===annee) ? null : annee;
+        renderReglages();
+      });
+    });
     document.getElementById('input-jsonbin-cle').addEventListener('change', function(e){
       identifiantsCloud.masterKey = e.target.value.trim();
       sauvegarderIdentifiantsCloud();
@@ -876,6 +1041,7 @@
         if(Array.isArray(data.categoriesEntree)) state.categoriesEntree = data.categoriesEntree;
         if(typeof data.objectifEpargne==='number') state.objectifEpargne = data.objectifEpargne;
         if(typeof data.soldeInitial==='number') state.soldeInitial = data.soldeInitial;
+        state.archives = Array.isArray(data.archives) ? data.archives : [];
         sauvegarder();
         render();
         toast('Import réussi');
@@ -889,6 +1055,7 @@
   function effacerToutesLesDonnees(){
     if(!confirm('Effacer définitivement toutes les transactions ? Cette action est irréversible.')) return;
     state.transactions = [];
+    state.archives = [];
     sauvegarder();
     render();
     toast('Données effacées');
@@ -1327,10 +1494,14 @@
     form.reset();
     document.getElementById('btn-supprimer-transaction').style.display = 'none';
     document.getElementById('input-id-transaction').value = '';
-    document.getElementById('input-date').value = new Date().toISOString().slice(0,10);
+    document.getElementById('input-date').value = dateLocaleISO();
+    document.getElementById('input-recurrent').checked = false;
     document.querySelectorAll('.segment-type button').forEach(function(b){ b.classList.remove('actif'); });
 
     var t = transactionId ? state.transactions.find(function(x){return x.id===transactionId;}) : null;
+    // La récurrence ne se définit qu'à la création : la modifier après coup sur une occurrence
+    // déjà générée prêterait à confusion (série déjà projetée jusqu'à fin d'année).
+    document.getElementById('ligne-champ-recurrent').style.display = t ? 'none' : 'flex';
     var typeInitial = t ? t.type : 'sortie';
     var boutonType = document.querySelector('.segment-type button[data-type="'+typeInitial+'"]');
     if(boutonType) boutonType.classList.add('actif');
@@ -1388,15 +1559,26 @@
     if(!(montant>0)){ toast('Montant invalide'); return; }
     var categorie = document.getElementById('input-categorie').value;
     var description = document.getElementById('input-description').value.trim();
-    var date = document.getElementById('input-date').value || new Date().toISOString().slice(0,10);
+    var date = document.getElementById('input-date').value || dateLocaleISO();
 
     if(id){
       var t = state.transactions.find(function(x){return x.id===id;});
       if(t){ t.type=type; t.montant=montant; t.categorie=categorie; t.description=description; t.date=date; }
       toast('Mouvement modifié');
     } else {
-      state.transactions.push({id: genId(), type:type, montant:montant, categorie:categorie, description:description, date:date});
-      toast('Mouvement ajouté');
+      var recurrent = document.getElementById('input-recurrent').checked;
+      var nouvelle = {id: genId(), type:type, montant:montant, categorie:categorie, description:description, date:date};
+      if(recurrent){
+        nouvelle.recurrent = true;
+        nouvelle.recurrenceId = nouvelle.id;
+        var occurrences = genererOccurrencesRecurrentes(nouvelle);
+        state.transactions = state.transactions.concat(occurrences);
+        state.transactions.push(nouvelle);
+        toast(occurrences.length>0 ? ('Mouvement ajouté + '+occurrences.length+' occurrence(s) jusqu\'à fin d\'année') : 'Mouvement ajouté');
+      } else {
+        state.transactions.push(nouvelle);
+        toast('Mouvement ajouté');
+      }
     }
     fermerModal();
     sauvegarder();
@@ -1405,13 +1587,18 @@
   document.getElementById('btn-supprimer-transaction').addEventListener('click', function(){
     var id = document.getElementById('input-id-transaction').value;
     if(!id) return;
-    if(confirm('Supprimer ce mouvement ?')){
-      state.transactions = state.transactions.filter(function(t){return t.id!==id;});
-      fermerModal();
-      sauvegarder();
-      render();
-      toast('Mouvement supprimé');
+    var t = state.transactions.find(function(x){return x.id===id;});
+    if(!t) return;
+    if(!confirm('Supprimer ce mouvement ?')) return;
+    if(t.recurrenceId && confirm('Ce mouvement fait partie d\'une série récurrente. Supprimer aussi ses occurrences à venir (à partir de cette date) ?')){
+      state.transactions = state.transactions.filter(function(x){ return !(x.recurrenceId===t.recurrenceId && x.date>=t.date); });
+    } else {
+      state.transactions = state.transactions.filter(function(x){return x.id!==id;});
     }
+    fermerModal();
+    sauvegarder();
+    render();
+    toast('Mouvement supprimé');
   });
   document.getElementById('barre-periode').addEventListener('click', function(e){
     var btn = e.target.closest('.chip-periode');
