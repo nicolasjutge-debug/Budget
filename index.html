@@ -535,7 +535,8 @@
   function soldeGlobal(){
     // Le solde est calculé à date : les mouvements saisis avec une date future (ex. charges
     // récurrentes projetées, virement planifié) ne sont pas encore réalisés et ne doivent
-    // donc pas impacter le solde affiché — ils restent visibles dans Mouvements/Répartition.
+    // donc pas impacter le solde affiché — ils restent visibles dans Mouvements/Répartition et
+    // regroupés à part dans l'Item « Échéances à venir » du Dashboard (voir echeancesAVenir).
     var aujourdhui = dateLocaleISO();
     return state.transactions.reduce(function(acc,t){
       if(t.date > aujourdhui) return acc;
@@ -547,6 +548,16 @@
     var entrees = txs.filter(function(t){return t.type==='entree';}).reduce(function(a,t){return a+t.montant;},0);
     var sorties = txs.filter(function(t){return t.type==='sortie';}).reduce(function(a,t){return a+t.montant;},0);
     return {entrees:entrees, sorties:sorties};
+  }
+  // Mouvements datés dans le futur (dont les occurrences de récurrences pas encore atteintes) :
+  // n'impactent pas le solde (voir soldeGlobal) tant que leur date n'est pas arrivée. Affichés à
+  // part dans un Item dédié du Dashboard (renderBlocEcheances) plutôt que noyés dans le solde.
+  function echeancesAVenir(){
+    var aujourdhui = dateLocaleISO();
+    return state.transactions.filter(function(t){ return t.date > aujourdhui; }).sort(function(a,b){
+      if(a.date === b.date) return (a.id||'').localeCompare(b.id||'');
+      return a.date < b.date ? -1 : 1;
+    });
   }
   function repartitionParCategorie(){
     var txs = transactionsPeriode().filter(function(t){return t.type==='sortie';});
@@ -564,10 +575,22 @@
       return {id:c.id, nom:c.nom, couleur:c.couleur, objectif:c.objectif, montant:c.montant, pct:c.pct, ecart:c.pct - c.objectif};
     }).sort(function(a,b){ return b.ecart - a.ecart; });
   }
+  // Les sorties catégorisées « Épargne » sont de l'argent mis de côté, pas dépensé : on les retire
+  // des sorties prises en compte pour le taux d'épargne réel, sinon un virement vers l'épargne fait
+  // mécaniquement baisser ce taux alors qu'il traduit l'inverse (cf. incohérence -8,9% vs carte
+  // Épargne à 47% du plan d'optimisation, qui elle raisonne déjà correctement par catégorie).
+  function montantEpargnePeriode(){
+    return transactionsPeriode().filter(function(t){ return t.type==='sortie' && t.categorie==='epargne'; })
+      .reduce(function(a,t){ return a+t.montant; }, 0);
+  }
+  function epargneNettePeriode(){
+    var t = totauxPeriode();
+    return (t.entrees - t.sorties) + montantEpargnePeriode();
+  }
   function tauxEpargneReel(){
     var t = totauxPeriode();
     if(t.entrees<=0) return 0;
-    return (t.entrees - t.sorties) / t.entrees * 100;
+    return epargneNettePeriode() / t.entrees * 100;
   }
 
   // ---------- Mouvements récurrents ----------
@@ -697,7 +720,7 @@
   function render(){ renderVueActive(); }
 
   // ---------- Rendu : liste de mouvements (partagé) ----------
-  function renderListeMouvements(txs){
+  function renderListeMouvements(txs, masquerAVenir){
     if(txs.length===0){
       return '<div class="etat-vide"><p>Le grand livre est vierge.</p><p class="etat-vide-sous">Notez votre première entrée ou sortie pour commencer.</p></div>';
     }
@@ -707,7 +730,7 @@
       var signe = t.type==='entree' ? '+' : '-';
       var classe = t.type==='entree' ? 'ink-credit' : 'ink-debit';
       var marques = '';
-      if(t.date > aujourdhui) marques += ' · <span class="marque-avenir">à venir</span>';
+      if(!masquerAVenir && t.date > aujourdhui) marques += ' · <span class="marque-avenir">à venir</span>';
       if(t.recurrent) marques += ' <span class="marque-recurrent" title="Mouvement récurrent">↻'+(LIBELLES_FREQUENCE[t.recurrenceFrequence] ? ' '+LIBELLES_FREQUENCE[t.recurrenceFrequence] : '')+'</span>';
       return '<button class="ligne-mvt" data-id="'+t.id+'" type="button">' +
         '<span class="ligne-mvt-tick" style="background:'+cat.couleur+'"></span>' +
@@ -725,6 +748,20 @@
     });
   }
 
+  // ---------- Rendu : Échéances à venir (Item dédié, distinct du solde) ----------
+  function renderBlocEcheances(echeances){
+    if(echeances.length===0) return '';
+    var net = echeances.reduce(function(a,t){ return a + (t.type==='entree'? t.montant : -t.montant); }, 0);
+    var signe = net>=0 ? '+' : '';
+    var visibles = echeances.slice(0,5);
+    var reste = echeances.length - visibles.length;
+    return '<div class="section-titre-ligne"><h2 class="section-titre">Échéances à venir</h2></div>' +
+      '<p class="aide-texte">'+echeances.length+' échéance'+(echeances.length>1?'s':'')+' programmée'+(echeances.length>1?'s':'')+
+        ' · impact net '+signe+formatMontant(net)+' — n\'impactent pas le solde avant leur date</p>' +
+      renderListeMouvements(visibles, true) +
+      (reste>0 ? '<p class="aide-texte" style="text-align:center;margin-top:-4px">+ '+reste+' autre'+(reste>1?'s':'')+'</p>' : '');
+  }
+
   // ---------- Rendu : Dashboard ----------
   function renderDashboard(){
     var solde = soldeGlobal();
@@ -732,6 +769,7 @@
     var el = document.getElementById('vue-dashboard');
     var soldePositif = solde >= 0;
     var recents = state.transactions.slice().sort(trierParDateDesc).slice(0,5);
+    var echeances = echeancesAVenir();
     el.innerHTML =
       '<div class="hero-solde">' +
         '<p class="eyebrow">Solde du grand livre</p>' +
@@ -743,6 +781,7 @@
         '<div class="carte-stat"><p class="carte-stat-label">Entrées · '+libellePeriode()+'</p><p class="carte-stat-valeur ink-credit">+'+formatMontant(t.entrees)+'</p></div>' +
         '<div class="carte-stat"><p class="carte-stat-label">Sorties · '+libellePeriode()+'</p><p class="carte-stat-valeur ink-debit">-'+formatMontant(t.sorties)+'</p></div>' +
       '</div>' +
+      renderBlocEcheances(echeances) +
       '<div class="section-titre-ligne"><h2 class="section-titre">Derniers mouvements</h2><button class="lien-voir-tout" type="button" data-nav="mouvements">Tout voir</button></div>' +
       renderListeMouvements(recents);
     var lien = el.querySelector('[data-nav="mouvements"]');
@@ -802,7 +841,7 @@
     var tauxReel = tauxEpargneReel();
     var objectifEp = state.objectifEpargne;
     var atteint = tauxReel >= objectifEp;
-    var manqueEp = Math.max(0, (objectifEp/100*t.entrees) - (t.entrees - t.sorties));
+    var manqueEp = Math.max(0, (objectifEp/100*t.entrees) - epargneNettePeriode());
     var plan = planOptimisation();
 
     var html = '<h2 class="section-titre">Plan d\'optimisation</h2>';
@@ -874,7 +913,24 @@
           if(!cat) return;
           var champ = input.dataset.champ;
           if(champ==='nom') cat.nom = input.value.trim() || cat.nom;
-          if(champ==='objectif') cat.objectif = Math.max(0, Math.min(100, parseFloat(input.value)||0));
+          if(champ==='objectif'){
+            var nouvelleValeur = Math.max(0, Math.min(100, parseFloat(input.value)||0));
+            cat.objectif = nouvelleValeur;
+            // Une modification manuelle qui ferait dépasser 100% au total rééquilibre les AUTRES
+            // catégories proportionnellement, comme à l'ajout d'une catégorie (cf.
+            // reequilibrerObjectifsApresAjout) — la somme retombe pile sur 100%.
+            if(type==='sortie'){
+              var autres = cats.filter(function(c){ return c.id!==catId; });
+              var sommeAutres = autres.reduce(function(a,c){ return a+(c.objectif||0); }, 0);
+              if(autres.length>0 && nouvelleValeur + sommeAutres > 100){
+                redistribuerAutresObjectifs(autres, nouvelleValeur);
+                sauvegarder();
+                renderReglages();
+                toast('Objectif mis à jour — autres postes réajustés à 100%');
+                return;
+              }
+            }
+          }
           sauvegarder();
         });
       });
@@ -882,26 +938,34 @@
       if(btnSup) btnSup.addEventListener('click', function(){ supprimerCategorie(catId, type); });
     });
   }
+  // Redistribue proportionnellement les objectifs d'un ensemble de catégories « autres » pour
+  // qu'elles occupent l'espace restant (100 - valeurCible), en conservant leur poids relatif entre
+  // elles. La plus grosse catégorie absorbe l'écart d'arrondi pour retomber pile sur la cible.
+  // Partagée par : l'ajout d'une catégorie, la modification manuelle d'un objectif qui ferait
+  // dépasser 100% au total, et le bouton « Rééquilibrer à 100% » (valeurCible=0, autres=toutes).
+  function redistribuerAutresObjectifs(autres, valeurCible){
+    if(autres.length === 0) return;
+    var sommeActuelle = autres.reduce(function(a,c){ return a+(c.objectif||0); }, 0);
+    if(sommeActuelle <= 0) return; // rien à répartir proportionnellement
+    var espaceRestant = Math.max(0, 100 - valeurCible);
+    var facteur = espaceRestant / sommeActuelle;
+    var sommeArrondie = 0;
+    autres.forEach(function(c){
+      c.objectif = Math.round((c.objectif||0) * facteur);
+      sommeArrondie += c.objectif;
+    });
+    var ecart = espaceRestant - sommeArrondie;
+    if(ecart !== 0){
+      var plusGrosse = autres.reduce(function(a,b){ return (b.objectif>a.objectif)?b:a; }, autres[0]);
+      plusGrosse.objectif = Math.max(0, plusGrosse.objectif + ecart);
+    }
+  }
   // Quand une catégorie de dépense est ajoutée, les objectifs des catégories EXISTANTES sont
   // rééquilibrés proportionnellement pour laisser la place à la nouvelle tout en conservant leur
   // poids relatif, de sorte que la somme totale (existantes + nouvelle) retombe pile sur 100%.
   function reequilibrerObjectifsApresAjout(existantes, nouvelle){
     if(existantes.length === 0){ nouvelle.objectif = 100; return; }
-    var sommeActuelle = existantes.reduce(function(a,c){ return a+(c.objectif||0); }, 0);
-    if(sommeActuelle <= 0) return; // rien à répartir proportionnellement
-    var espaceRestant = Math.max(0, 100 - nouvelle.objectif);
-    var facteur = espaceRestant / sommeActuelle;
-    var sommeArrondie = 0;
-    existantes.forEach(function(c){
-      c.objectif = Math.round((c.objectif||0) * facteur);
-      sommeArrondie += c.objectif;
-    });
-    // La plus grosse catégorie existante absorbe l'écart d'arrondi pour retomber pile sur 100%.
-    var ecart = espaceRestant - sommeArrondie;
-    if(ecart !== 0){
-      var plusGrosse = existantes.reduce(function(a,b){ return (b.objectif>a.objectif)?b:a; }, existantes[0]);
-      plusGrosse.objectif = Math.max(0, plusGrosse.objectif + ecart);
-    }
+    redistribuerAutresObjectifs(existantes, nouvelle.objectif);
   }
   function ajouterCategorie(type){
     var nom = prompt(type==='sortie' ? 'Nom du nouveau poste de dépense :' : 'Nom de la nouvelle source de revenu :');
@@ -975,6 +1039,7 @@
       '</div>' +
       '<div class="bloc-reglage"><h3 class="sous-titre">Postes de dépenses</h3>' +
         '<p class="aide-texte">Somme des objectifs : '+sommeObjectifs+'%'+(sommeObjectifs!==100?' (idéalement ≈ 100%)':'')+'</p>' +
+        (sommeObjectifs!==100 ? '<button class="bouton-secondaire" type="button" id="btn-reequilibrer-objectifs" style="margin-bottom:10px">Rééquilibrer à 100%</button>' : '') +
         '<div class="liste-categories" id="liste-cat-sortie">' + state.categoriesSortie.map(function(c){return renderLigneCategorie(c,'sortie');}).join('') + '</div>' +
         '<button class="bouton-secondaire" type="button" id="btn-ajouter-cat-sortie">+ Ajouter un poste de dépense</button>' +
       '</div>' +
@@ -1017,6 +1082,13 @@
       state.objectifEpargne = isNaN(v) ? 0 : Math.max(0, Math.min(100, v));
       sauvegarder();
       toast('Objectif mis à jour');
+    });
+    var btnReequilibrer = document.getElementById('btn-reequilibrer-objectifs');
+    if(btnReequilibrer) btnReequilibrer.addEventListener('click', function(){
+      redistribuerAutresObjectifs(state.categoriesSortie, 0);
+      sauvegarder();
+      renderReglages();
+      toast('Objectifs rééquilibrés à 100%');
     });
     attacherLignesCategories(el, 'sortie');
     attacherLignesCategories(el, 'entree');
