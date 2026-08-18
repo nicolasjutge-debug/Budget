@@ -217,8 +217,6 @@
   .bouton-icone{ background:none; border:none; font-size:16px; color:var(--ink-soft); cursor:pointer; padding:6px; }
 
   .form-transaction{ display:flex; flex-direction:column; gap:14px; }
-  .ligne-case{ display:flex; align-items:center; gap:9px; font-size:13.5px; color:var(--ink); cursor:pointer; }
-  .ligne-case input[type="checkbox"]{ width:18px; height:18px; flex-shrink:0; accent-color:var(--green-deep); }
   .segment-type{ display:flex; border:1px solid var(--line); border-radius:10px; overflow:hidden; }
   .segment-type button{ flex:1; padding:10px; background:var(--paper-raised); border:none; font-size:14px; color:var(--ink-soft); cursor:pointer; }
   .segment-type button.actif{ background:var(--green-deep); color:var(--paper); }
@@ -337,9 +335,15 @@
       <label class="etiquette-champ">Date
         <input type="date" id="input-date" class="input-texte" required>
       </label>
-      <label class="ligne-case" id="ligne-champ-recurrent">
-        <input type="checkbox" id="input-recurrent">
-        <span>Mouvement récurrent (mensuel, jusqu'à fin d'année)</span>
+      <label class="etiquette-champ" id="ligne-champ-recurrent">Récurrence
+        <select id="input-recurrence" class="input-select">
+          <option value="aucune">Aucune</option>
+          <option value="hebdomadaire">Hebdomadaire</option>
+          <option value="mensuel">Mensuel</option>
+          <option value="trimestriel">Trimestriel</option>
+          <option value="semestriel">Semestriel</option>
+          <option value="annuel">Annuel</option>
+        </select>
       </label>
       <button type="submit" class="bouton-principal">Enregistrer</button>
       <button type="button" id="btn-supprimer-transaction" class="bouton-danger" style="display:none">Supprimer ce mouvement</button>
@@ -374,6 +378,7 @@
     {id:'virements', nom:'Virements', couleur:'#6B6E8C'}
   ];
   var PALETTE_CATEGORIES = ['#2B5F6B','#B8863C','#4A5C8A','#7A4C6D','#6E8C5A','#C4703F','#6B8CAE','#1E4B3A','#8A7F6E'];
+  var LIBELLES_FREQUENCE = {hebdomadaire:'hebdo', mensuel:'mensuel', trimestriel:'trim.', semestriel:'semestre', annuel:'annuel'};
 
   var state = {
     transactions: [],
@@ -565,24 +570,51 @@
   }
 
   // ---------- Mouvements récurrents ----------
-  // Génère, à partir d'un mouvement de base, une occurrence par mois suivant (même jour du mois,
-  // ramené au dernier jour si le mois est plus court) jusqu'à décembre inclus de son année civile.
+  // Génère, à partir d'un mouvement de base et d'une fréquence, les occurrences futures :
+  // - hebdomadaire/mensuel/trimestriel/semestriel : jusqu'à décembre inclus de l'année civile de la
+  //   date saisie (même jour du mois pour les fréquences mensuelles, ramené au dernier jour si le
+  //   mois est plus court). C'est le mécanisme mensuel déjà validé, généralisé à un pas variable.
+  // - annuel : un cycle annuel ne repasse par définition jamais avant le 31/12 de l'année en cours,
+  //   donc le plafond « fin d'année civile » n'a pas de sens ici ; on projette la seule prochaine
+  //   échéance, un an jour pour jour après la saisie.
   // Ces occurrences futures s'intègrent naturellement à Répartition/Optimisation (période « Cette
   // année » ou « Tout ») mais n'impactent pas le solde tant que leur date n'est pas atteinte.
-  function genererOccurrencesRecurrentes(base){
+  function fabriquerOccurrence(base, dateOccurrence){
+    return {
+      id: genId(), type: base.type, montant: base.montant, categorie: base.categorie,
+      description: base.description, date: dateOccurrence,
+      recurrent: true, recurrenceId: base.recurrenceId, recurrenceFrequence: base.recurrenceFrequence
+    };
+  }
+  function genererOccurrencesRecurrentes(base, frequence){
     var d0 = new Date(base.date+'T00:00:00');
+    var occurrences = [];
+
+    if(frequence === 'hebdomadaire'){
+      var an0 = d0.getFullYear();
+      for(var k=1; ; k++){
+        var d = new Date(an0, d0.getMonth(), d0.getDate() + 7*k);
+        if(d.getFullYear() !== an0) break; // sorti de l'année civile de départ
+        occurrences.push(fabriquerOccurrence(base, dateLocaleISO(d)));
+      }
+      return occurrences;
+    }
+
+    if(frequence === 'annuel'){
+      var dSuivante = new Date(d0.getFullYear()+1, d0.getMonth(), d0.getDate());
+      occurrences.push(fabriquerOccurrence(base, dateLocaleISO(dSuivante)));
+      return occurrences;
+    }
+
+    // mensuel (pas=1, comportement d'origine inchangé) / trimestriel (pas=3) / semestriel (pas=6)
+    var pasMois = frequence==='trimestriel' ? 3 : (frequence==='semestriel' ? 6 : 1);
     var jourCible = d0.getDate();
     var anneeCible = d0.getFullYear();
-    var occurrences = [];
-    for(var mois = d0.getMonth()+1; mois <= 11; mois++){
+    for(var mois = d0.getMonth()+pasMois; mois <= 11; mois += pasMois){
       var dernierJourMois = new Date(anneeCible, mois+1, 0).getDate();
       var jour = Math.min(jourCible, dernierJourMois);
       var dateOccurrence = anneeCible + '-' + String(mois+1).padStart(2,'0') + '-' + String(jour).padStart(2,'0');
-      occurrences.push({
-        id: genId(), type: base.type, montant: base.montant, categorie: base.categorie,
-        description: base.description, date: dateOccurrence,
-        recurrent: true, recurrenceId: base.recurrenceId
-      });
+      occurrences.push(fabriquerOccurrence(base, dateOccurrence));
     }
     return occurrences;
   }
@@ -675,7 +707,7 @@
       var classe = t.type==='entree' ? 'ink-credit' : 'ink-debit';
       var marques = '';
       if(t.date > aujourdhui) marques += ' · <span class="marque-avenir">à venir</span>';
-      if(t.recurrent) marques += ' <span class="marque-recurrent" title="Mouvement récurrent">↻</span>';
+      if(t.recurrent) marques += ' <span class="marque-recurrent" title="Mouvement récurrent">↻'+(LIBELLES_FREQUENCE[t.recurrenceFrequence] ? ' '+LIBELLES_FREQUENCE[t.recurrenceFrequence] : '')+'</span>';
       return '<button class="ligne-mvt" data-id="'+t.id+'" type="button">' +
         '<span class="ligne-mvt-tick" style="background:'+cat.couleur+'"></span>' +
         '<span class="ligne-mvt-corps">' +
@@ -849,17 +881,41 @@
       if(btnSup) btnSup.addEventListener('click', function(){ supprimerCategorie(catId, type); });
     });
   }
+  // Quand une catégorie de dépense est ajoutée, les objectifs des catégories EXISTANTES sont
+  // rééquilibrés proportionnellement pour laisser la place à la nouvelle tout en conservant leur
+  // poids relatif, de sorte que la somme totale (existantes + nouvelle) retombe pile sur 100%.
+  function reequilibrerObjectifsApresAjout(existantes, nouvelle){
+    if(existantes.length === 0){ nouvelle.objectif = 100; return; }
+    var sommeActuelle = existantes.reduce(function(a,c){ return a+(c.objectif||0); }, 0);
+    if(sommeActuelle <= 0) return; // rien à répartir proportionnellement
+    var espaceRestant = Math.max(0, 100 - nouvelle.objectif);
+    var facteur = espaceRestant / sommeActuelle;
+    var sommeArrondie = 0;
+    existantes.forEach(function(c){
+      c.objectif = Math.round((c.objectif||0) * facteur);
+      sommeArrondie += c.objectif;
+    });
+    // La plus grosse catégorie existante absorbe l'écart d'arrondi pour retomber pile sur 100%.
+    var ecart = espaceRestant - sommeArrondie;
+    if(ecart !== 0){
+      var plusGrosse = existantes.reduce(function(a,b){ return (b.objectif>a.objectif)?b:a; }, existantes[0]);
+      plusGrosse.objectif = Math.max(0, plusGrosse.objectif + ecart);
+    }
+  }
   function ajouterCategorie(type){
     var nom = prompt(type==='sortie' ? 'Nom du nouveau poste de dépense :' : 'Nom de la nouvelle source de revenu :');
     if(!nom || !nom.trim()) return;
     var cats = type==='sortie' ? state.categoriesSortie : state.categoriesEntree;
     var couleur = PALETTE_CATEGORIES[cats.length % PALETTE_CATEGORIES.length];
     var nouvelle = {id: genId(), nom: nom.trim(), couleur: couleur};
-    if(type==='sortie') nouvelle.objectif = 5;
+    if(type==='sortie'){
+      nouvelle.objectif = 5;
+      reequilibrerObjectifsApresAjout(cats, nouvelle);
+    }
     cats.push(nouvelle);
     sauvegarder();
     renderReglages();
-    toast('Catégorie ajoutée');
+    toast(type==='sortie' ? 'Catégorie ajoutée — objectifs réajustés à 100%' : 'Catégorie ajoutée');
   }
   function supprimerCategorie(id, type){
     var enUsage = state.transactions.some(function(t){ return t.categorie===id && t.type===type; });
@@ -1495,7 +1551,7 @@
     document.getElementById('btn-supprimer-transaction').style.display = 'none';
     document.getElementById('input-id-transaction').value = '';
     document.getElementById('input-date').value = dateLocaleISO();
-    document.getElementById('input-recurrent').checked = false;
+    document.getElementById('input-recurrence').value = 'aucune';
     document.querySelectorAll('.segment-type button').forEach(function(b){ b.classList.remove('actif'); });
 
     var t = transactionId ? state.transactions.find(function(x){return x.id===transactionId;}) : null;
@@ -1566,15 +1622,17 @@
       if(t){ t.type=type; t.montant=montant; t.categorie=categorie; t.description=description; t.date=date; }
       toast('Mouvement modifié');
     } else {
-      var recurrent = document.getElementById('input-recurrent').checked;
+      var frequence = document.getElementById('input-recurrence').value;
       var nouvelle = {id: genId(), type:type, montant:montant, categorie:categorie, description:description, date:date};
-      if(recurrent){
+      if(frequence !== 'aucune'){
         nouvelle.recurrent = true;
         nouvelle.recurrenceId = nouvelle.id;
-        var occurrences = genererOccurrencesRecurrentes(nouvelle);
+        nouvelle.recurrenceFrequence = frequence;
+        var occurrences = genererOccurrencesRecurrentes(nouvelle, frequence);
         state.transactions = state.transactions.concat(occurrences);
         state.transactions.push(nouvelle);
-        toast(occurrences.length>0 ? ('Mouvement ajouté + '+occurrences.length+' occurrence(s) jusqu\'à fin d\'année') : 'Mouvement ajouté');
+        var suffixe = frequence==='annuel' ? 'reconduite l\'an prochain' : 'jusqu\'à fin d\'année';
+        toast(occurrences.length>0 ? ('Mouvement ajouté + '+occurrences.length+' échéance(s) '+suffixe) : 'Mouvement ajouté');
       } else {
         state.transactions.push(nouvelle);
         toast('Mouvement ajouté');
