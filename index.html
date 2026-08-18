@@ -344,6 +344,7 @@
           <option value="semestriel">Semestriel</option>
           <option value="annuel">Annuel</option>
         </select>
+        <span class="aide-texte" style="margin:0">Jusqu'à fin d'année ; sur un mouvement déjà ancien, les échéances passées sont aussi générées et impactent le solde.</span>
       </label>
       <button type="submit" class="bouton-principal">Enregistrer</button>
       <button type="button" id="btn-supprimer-transaction" class="bouton-danger" style="display:none">Supprimer ce mouvement</button>
@@ -1555,9 +1556,10 @@
     document.querySelectorAll('.segment-type button').forEach(function(b){ b.classList.remove('actif'); });
 
     var t = transactionId ? state.transactions.find(function(x){return x.id===transactionId;}) : null;
-    // La récurrence ne se définit qu'à la création : la modifier après coup sur une occurrence
-    // déjà générée prêterait à confusion (série déjà projetée jusqu'à fin d'année).
-    document.getElementById('ligne-champ-recurrent').style.display = t ? 'none' : 'flex';
+    // Masqué seulement si le mouvement appartient déjà à une série récurrente (rien à reconvertir,
+    // et régénérer par-dessus créerait des doublons) ; affiché pour une création ET pour l'édition
+    // d'un mouvement pas encore récurrent, afin de pouvoir transformer un mouvement déjà saisi.
+    document.getElementById('ligne-champ-recurrent').style.display = (t && t.recurrenceId) ? 'none' : 'flex';
     var typeInitial = t ? t.type : 'sortie';
     var boutonType = document.querySelector('.segment-type button[data-type="'+typeInitial+'"]');
     if(boutonType) boutonType.classList.add('actif');
@@ -1619,8 +1621,31 @@
 
     if(id){
       var t = state.transactions.find(function(x){return x.id===id;});
-      if(t){ t.type=type; t.montant=montant; t.categorie=categorie; t.description=description; t.date=date; }
-      toast('Mouvement modifié');
+      if(t){
+        t.type=type; t.montant=montant; t.categorie=categorie; t.description=description; t.date=date;
+        // Conversion en récurrent : uniquement possible si le mouvement n'appartient pas déjà à
+        // une série (champ masqué dans ce cas — voir ouvrirModal). Réutilise le même générateur
+        // que pour une création : comme il part de la date du mouvement (pas d'aujourd'hui), les
+        // échéances passées entre cette date et aujourd'hui sont générées au même titre que les
+        // futures, et impactent donc immédiatement le solde puisqu'elles ne sont plus à venir.
+        var frequenceConv = t.recurrenceId ? 'aucune' : document.getElementById('input-recurrence').value;
+        if(frequenceConv !== 'aucune'){
+          t.recurrent = true;
+          t.recurrenceId = t.id;
+          t.recurrenceFrequence = frequenceConv;
+          var occConv = genererOccurrencesRecurrentes(t, frequenceConv);
+          state.transactions = state.transactions.concat(occConv);
+          var aujourdhuiConv = dateLocaleISO();
+          var nbPassees = occConv.filter(function(o){ return o.date <= aujourdhuiConv; }).length;
+          var nbFutures = occConv.length - nbPassees;
+          var detail = [];
+          if(nbPassees>0) detail.push(nbPassees+' passée(s)');
+          if(nbFutures>0) detail.push(nbFutures+' à venir');
+          toast('Transformé en récurrent' + (detail.length ? (' — '+detail.join(' + ')+' générée(s)') : ''));
+        } else {
+          toast('Mouvement modifié');
+        }
+      }
     } else {
       var frequence = document.getElementById('input-recurrence').value;
       var nouvelle = {id: genId(), type:type, montant:montant, categorie:categorie, description:description, date:date};
