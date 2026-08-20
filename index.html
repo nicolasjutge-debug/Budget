@@ -123,7 +123,8 @@
   .marque-recurrent{ color:var(--ink-soft); }
   .ligne-mvt-montant{ font-family:var(--font-mono); font-size:14.5px; font-weight:500; font-variant-numeric:tabular-nums; flex-shrink:0; }
 
-  .filtre-cat-conteneur{ margin-bottom:10px; }
+  .filtres-mouvements{ display:flex; flex-direction:column; gap:8px; margin-bottom:10px; }
+  .segment-type.segment-type--compact button{ font-size:12.5px; padding:9px 4px; }
   .select-filtre{ width:100%; font-family:var(--font-body); font-size:14px; padding:10px 12px; border-radius:10px; border:1px solid var(--line); background:var(--paper-raised); color:var(--ink); }
 
   .conteneur-donut{ position:relative; width:196px; height:196px; margin:10px auto 20px; }
@@ -380,6 +381,7 @@
   ];
   var PALETTE_CATEGORIES = ['#2B5F6B','#B8863C','#4A5C8A','#7A4C6D','#6E8C5A','#C4703F','#6B8CAE','#1E4B3A','#8A7F6E'];
   var LIBELLES_FREQUENCE = {hebdomadaire:'hebdo', mensuel:'mensuel', trimestriel:'trim.', semestriel:'semestre', annuel:'annuel'};
+  var LIBELLES_FILTRE_RECURRENCE = {toutes:'Tous', ponctuels:'Ponctuels', recurrents:'Récurrents'};
 
   var state = {
     transactions: [],
@@ -389,6 +391,7 @@
     soldeInitial: 0,
     periode: 'mois',
     filtreCategorie: 'toutes',
+    filtreRecurrence: 'toutes', // 'toutes' | 'ponctuels' | 'recurrents' — isole les mouvements courants noyés parmi les échéances récurrentes générées
     archives: [] // années civiles archivées : [{annee, transactions:[...], soldeNet, dateArchivage}]
   };
   // Séparé de `state` à dessein : ne doit jamais se retrouver dans un export JSON/Excel partagé.
@@ -720,9 +723,11 @@
   function render(){ renderVueActive(); }
 
   // ---------- Rendu : liste de mouvements (partagé) ----------
-  function renderListeMouvements(txs, masquerAVenir){
+  function renderListeMouvements(txs, masquerAVenir, videTitre, videSous){
     if(txs.length===0){
-      return '<div class="etat-vide"><p>Le grand livre est vierge.</p><p class="etat-vide-sous">Notez votre première entrée ou sortie pour commencer.</p></div>';
+      var titreVide = videTitre || 'Le grand livre est vierge.';
+      var sousVide = (videSous!==undefined) ? videSous : 'Notez votre première entrée ou sortie pour commencer.';
+      return '<div class="etat-vide"><p>'+titreVide+'</p>'+(sousVide ? '<p class="etat-vide-sous">'+sousVide+'</p>' : '')+'</div>';
     }
     var aujourdhui = dateLocaleISO();
     return '<div class="liste-mvts">' + txs.map(function(t){
@@ -793,19 +798,43 @@
   function renderMouvements(){
     var el = document.getElementById('vue-mouvements');
     var filtreCat = state.filtreCategorie || 'toutes';
+    var filtreRec = state.filtreRecurrence || 'toutes';
     var txs = state.transactions.slice().sort(trierParDateDesc);
     if(filtreCat !== 'toutes'){ txs = txs.filter(function(t){ return t.categorie===filtreCat; }); }
+    if(filtreRec === 'ponctuels'){ txs = txs.filter(function(t){ return !t.recurrent; }); }
+    else if(filtreRec === 'recurrents'){ txs = txs.filter(function(t){ return !!t.recurrent; }); }
     var toutesCats = state.categoriesSortie.concat(state.categoriesEntree);
+    var filtreActif = (filtreCat !== 'toutes') || (filtreRec !== 'toutes');
+    var resumeHtml = '';
+    if(txs.length>0){
+      var net = txs.reduce(function(a,t){ return a + (t.type==='entree'? t.montant : -t.montant); }, 0);
+      var signeNet = net>=0 ? '+' : '';
+      resumeHtml = '<p class="aide-texte">'+txs.length+' mouvement'+(txs.length>1?'s':'')+' affiché'+(txs.length>1?'s':'')+' · impact net '+signeNet+formatMontant(net)+'</p>';
+    }
     el.innerHTML =
       '<h2 class="section-titre">Mouvements</h2>' +
-      '<div class="filtre-cat-conteneur"><select id="select-filtre-cat" class="select-filtre">' +
-        '<option value="toutes">Toutes les catégories</option>' +
-        toutesCats.map(function(c){ return '<option value="'+c.id+'" '+(c.id===filtreCat?'selected':'')+'>'+escapeHtml(c.nom)+'</option>'; }).join('') +
-      '</select></div>' +
-      renderListeMouvements(txs);
+      '<div class="filtres-mouvements">' +
+        '<select id="select-filtre-cat" class="select-filtre">' +
+          '<option value="toutes">Toutes les catégories</option>' +
+          toutesCats.map(function(c){ return '<option value="'+c.id+'" '+(c.id===filtreCat?'selected':'')+'>'+escapeHtml(c.nom)+'</option>'; }).join('') +
+        '</select>' +
+        '<div class="segment-type segment-type--compact" id="segment-filtre-recurrence" role="group" aria-label="Filtrer par récurrence">' +
+          ['toutes','ponctuels','recurrents'].map(function(v){
+            return '<button type="button" data-recurrence="'+v+'" class="'+(filtreRec===v?'actif':'')+'">'+LIBELLES_FILTRE_RECURRENCE[v]+'</button>';
+          }).join('') +
+        '</div>' +
+      '</div>' +
+      resumeHtml +
+      renderListeMouvements(txs, false, filtreActif ? 'Aucun mouvement ne correspond à ce filtre.' : undefined, filtreActif ? '' : undefined);
     document.getElementById('select-filtre-cat').addEventListener('change', function(e){
       state.filtreCategorie = e.target.value;
       renderMouvements();
+    });
+    document.getElementById('segment-filtre-recurrence').querySelectorAll('button').forEach(function(btn){
+      btn.addEventListener('click', function(){
+        state.filtreRecurrence = btn.dataset.recurrence;
+        renderMouvements();
+      });
     });
     attacherClicsLignes(el);
   }
