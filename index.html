@@ -188,6 +188,9 @@
   .detail-archive{ margin-top:10px; border-top:1px solid var(--line); padding-top:10px; }
   .detail-archive .liste-mvts{ box-shadow:none; }
   .detail-archive .ligne-mvt{ cursor:default; pointer-events:none; }
+  .detail-compte{ margin-top:10px; border-top:1px solid var(--line); padding-top:10px; }
+  .detail-compte .liste-mvts{ box-shadow:none; }
+  .ligne-mvt--compte{ cursor:default; }
 
   .etat-vide{ text-align:center; padding:40px 20px; color:var(--ink-soft); }
   .etat-vide p{ margin:4px 0; }
@@ -830,6 +833,28 @@
       btn.addEventListener('click', function(){ ouvrirModal(btn.dataset.id); });
     });
   }
+  // Rendu dédié aux mouvements d'un compte d'épargne (ajout manuel ou import CSV) : volontairement
+  // séparé de renderListeMouvements pour ne rien risquer sur le grand livre principal. Pas de
+  // catégorie ni de clic pour éditer (ces mouvements n'existent que dans compte.transactions, pas
+  // dans state.transactions) — juste le mouvement et un bouton de suppression par ligne.
+  function renderListeMouvementsCompte(compteId, txs){
+    if(txs.length===0){
+      return '<div class="etat-vide"><p>Ce compte est vierge.</p><p class="etat-vide-sous">Ajoutez un mouvement ou importez un relevé pour commencer.</p></div>';
+    }
+    return '<div class="liste-mvts">' + txs.map(function(t){
+      var signe = t.type==='entree' ? '+' : '-';
+      var classe = t.type==='entree' ? 'ink-credit' : 'ink-debit';
+      return '<div class="ligne-mvt ligne-mvt--compte">' +
+        '<span class="ligne-mvt-tick" style="background:'+(t.type==='entree'?'#2E7D53':'#B3452F')+'"></span>' +
+        '<span class="ligne-mvt-corps">' +
+          '<span class="ligne-mvt-titre">'+escapeHtml(t.description || (t.type==='entree'?'Entrée':'Sortie'))+'</span>' +
+          '<span class="ligne-mvt-sous">'+formatDateAffichage(t.date)+'</span>' +
+        '</span>' +
+        '<span class="ligne-mvt-montant '+classe+'">'+signe+formatMontant(t.montant)+'</span>' +
+        '<button type="button" class="bouton-supprimer-cat" data-action="suppr-mvt-compte" data-compte="'+compteId+'" data-mvt="'+t.id+'" title="Supprimer ce mouvement">✕</button>' +
+      '</div>';
+    }).join('') + '</div>';
+  }
 
   // ---------- Rendu : Échéances à venir (Item dédié, distinct du solde) ----------
   function renderBlocEcheances(echeances){
@@ -1151,7 +1176,7 @@
   }
   function renderBlocComptes(){
     var html = '<div class="bloc-reglage"><h3 class="sous-titre">Comptes d\'épargne</h3>' +
-      '<p class="aide-texte">Importez le relevé CSV propre à un compte d\'épargne pour créer son propre grand livre (solde, historique). Vos virements deviennent ensuite sélectionnables comme catégorie de sortie « Virement vers … » et comptent comme épargne dans votre taux réel.</p>';
+      '<p class="aide-texte">Créez un compte d\'épargne manuellement ou en important son relevé CSV : il fonctionne comme son propre grand livre (solde, historique). Vos virements deviennent ensuite sélectionnables comme catégorie de sortie « Virement vers … » et comptent comme épargne dans votre taux réel.</p>';
     if(state.comptes.length===0){
       html += '<p class="aide-texte">Aucun compte d\'épargne pour le moment.</p>';
     } else {
@@ -1165,13 +1190,26 @@
             '<span class="ligne-archive-info '+(soldePositif?'ink-credit':'ink-debit')+'">'+formatMontant(solde)+'</span>' +
           '</button>' +
           (ouvert ? (
-            '<div class="detail-archive">' +
+            '<div class="detail-compte">' +
               '<label class="etiquette-champ">Nom du compte' +
                 '<input type="text" class="input-texte" data-champ-compte="nom" data-id="'+c.id+'" value="'+escapeHtml(c.nom)+'"></label>' +
-              '<label class="etiquette-champ" style="margin-top:8px">Solde initial (avant le premier mouvement importé)' +
+              '<label class="etiquette-champ" style="margin-top:8px">Solde initial (avant le premier mouvement)' +
                 '<input type="text" inputmode="decimal" class="input-montant-champ" data-champ-compte="soldeInitial" data-id="'+c.id+'" value="'+String(c.soldeInitial||0).replace('.',',')+'" style="width:140px"></label>' +
-              '<div style="margin-top:12px">' + renderListeMouvements((c.transactions||[]).slice().sort(trierParDateDesc), false, 'Ce compte est vierge.', 'Importez un relevé pour commencer.') + '</div>' +
-              '<button class="bouton-secondaire" type="button" data-action="import-compte" data-id="'+c.id+'">Importer un relevé (CSV)</button>' +
+              '<div class="form-mvt-compte" style="margin-top:14px">' +
+                '<p class="etiquette-champ" style="margin-bottom:6px">Ajouter un mouvement</p>' +
+                '<div style="display:flex;gap:8px;margin-bottom:8px">' +
+                  '<select class="input-select" style="flex:0 0 110px" data-champ-mvt="type" data-id="'+c.id+'">' +
+                    '<option value="sortie">Sortie</option>' +
+                    '<option value="entree">Entrée</option>' +
+                  '</select>' +
+                  '<input type="text" inputmode="decimal" class="input-montant-champ" placeholder="Montant" style="flex:1" data-champ-mvt="montant" data-id="'+c.id+'">' +
+                '</div>' +
+                '<input type="text" class="input-texte" placeholder="Description (optionnel)" style="width:100%;margin-bottom:8px" data-champ-mvt="description" data-id="'+c.id+'">' +
+                '<input type="date" class="input-texte" style="width:100%;margin-bottom:8px" value="'+dateLocaleISO()+'" data-champ-mvt="date" data-id="'+c.id+'">' +
+                '<button class="bouton-secondaire" type="button" data-action="ajouter-mvt-compte" data-id="'+c.id+'">+ Ajouter ce mouvement</button>' +
+              '</div>' +
+              '<div style="margin-top:14px">' + renderListeMouvementsCompte(c.id, (c.transactions||[]).slice().sort(trierParDateDesc)) + '</div>' +
+              '<button class="bouton-secondaire" type="button" data-action="import-compte" data-id="'+c.id+'" style="margin-top:10px">Importer un relevé (CSV)</button>' +
               '<input type="file" class="input-import-compte-csv" data-id="'+c.id+'" accept=".csv,text/csv" style="display:none">' +
               '<button class="bouton-danger" type="button" data-action="supprimer-compte" data-id="'+c.id+'" style="margin-top:8px">Supprimer ce compte</button>' +
             '</div>'
@@ -1179,7 +1217,10 @@
         '</div>';
       }).join('') + '</div>';
     }
-    html += '<button class="bouton-secondaire" type="button" id="btn-nouveau-compte-epargne">+ Nouveau compte d\'épargne (import CSV)</button>' +
+    html += '<div style="display:flex;gap:8px">' +
+        '<button class="bouton-secondaire" type="button" id="btn-nouveau-compte-manuel" style="margin-top:4px">+ Compte manuel</button>' +
+        '<button class="bouton-secondaire" type="button" id="btn-nouveau-compte-epargne" style="margin-top:4px">+ Import CSV</button>' +
+      '</div>' +
       '<input type="file" id="input-nouveau-compte-csv" accept=".csv,text/csv" style="display:none">' +
     '</div>';
     return html;
@@ -1356,6 +1397,13 @@
     });
     document.getElementById('btn-nouveau-compte-epargne').addEventListener('click', function(){ document.getElementById('input-nouveau-compte-csv').click(); });
     document.getElementById('input-nouveau-compte-csv').addEventListener('change', importerNouveauCompteCSV);
+    document.getElementById('btn-nouveau-compte-manuel').addEventListener('click', creerCompteManuel);
+    el.querySelectorAll('[data-action="ajouter-mvt-compte"]').forEach(function(btn){
+      btn.addEventListener('click', function(){ ajouterMouvementCompte(btn.dataset.id); });
+    });
+    el.querySelectorAll('[data-action="suppr-mvt-compte"]').forEach(function(btn){
+      btn.addEventListener('click', function(){ supprimerMouvementCompte(btn.dataset.compte, btn.dataset.mvt); });
+    });
   }
 
   // ---------- Export / Import / Reset ----------
@@ -1757,6 +1805,59 @@
       e.target.value = '';
     };
     lecteur.readAsText(fichier, 'UTF-8');
+  }
+  function creerCompteManuel(){
+    var nom = prompt('Nom du nouveau compte d\'épargne :', 'Livret');
+    if(!nom || !nom.trim()){ return; }
+    var soldeSaisi = prompt('Solde de départ (laisser vide pour 0) :', '0');
+    var solde = soldeSaisi==null || soldeSaisi.trim()==='' ? 0 : parseMontant(soldeSaisi);
+    if(isNaN(solde)) solde = 0;
+    var compte = {
+      id: genId(),
+      nom: nom.trim(),
+      couleur: PALETTE_CATEGORIES[state.comptes.length % PALETTE_CATEGORIES.length],
+      soldeInitial: solde,
+      transactions: [],
+      dateCreation: dateLocaleISO()
+    };
+    state.comptes.push(compte);
+    compteOuvertId = compte.id;
+    sauvegarder();
+    renderReglages();
+    render();
+    toast('Compte « '+compte.nom+' » créé');
+  }
+  function ajouterMouvementCompte(compteId){
+    var compte = getCompte(compteId);
+    if(!compte) return;
+    var elType = document.querySelector('.form-mvt-compte [data-champ-mvt="type"][data-id="'+compteId+'"]');
+    var elMontant = document.querySelector('.form-mvt-compte [data-champ-mvt="montant"][data-id="'+compteId+'"]');
+    var elDescr = document.querySelector('.form-mvt-compte [data-champ-mvt="description"][data-id="'+compteId+'"]');
+    var elDate = document.querySelector('.form-mvt-compte [data-champ-mvt="date"][data-id="'+compteId+'"]');
+    var montant = parseMontant(elMontant.value);
+    if(!montant || isNaN(montant) || montant<=0){ toast('Indiquez un montant valide'); return; }
+    var mouvement = {
+      id: genId(),
+      type: elType.value==='entree' ? 'entree' : 'sortie',
+      montant: montant,
+      description: elDescr.value.trim(),
+      date: elDate.value || dateLocaleISO()
+    };
+    compte.transactions = (compte.transactions||[]).concat([mouvement]);
+    sauvegarder();
+    renderReglages();
+    render();
+    toast('Mouvement ajouté à « '+compte.nom+' »');
+  }
+  function supprimerMouvementCompte(compteId, mvtId){
+    var compte = getCompte(compteId);
+    if(!compte) return;
+    if(!confirm('Supprimer ce mouvement ?')) return;
+    compte.transactions = (compte.transactions||[]).filter(function(t){ return t.id!==mvtId; });
+    sauvegarder();
+    renderReglages();
+    render();
+    toast('Mouvement supprimé');
   }
   function supprimerCompte(id){
     var compte = getCompte(id);
