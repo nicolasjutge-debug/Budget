@@ -170,6 +170,7 @@
   .ligne-categorie{ display:flex; align-items:center; gap:8px; }
   .input-cat-nom{ flex:1; min-width:0; font-family:var(--font-body); font-size:13.5px; padding:8px 10px; border-radius:8px; border:1px solid var(--line); background:var(--paper); color:var(--ink); }
   .input-cat-objectif{ width:52px; font-family:var(--font-mono); font-size:13.5px; padding:8px 6px; border-radius:8px; border:1px solid var(--line); background:var(--paper); color:var(--ink); text-align:right; }
+  .input-cat-objectif:disabled{ background:var(--stripe); color:var(--ink-soft); border-style:dashed; }
   .bouton-supprimer-cat{ background:none; border:none; color:var(--ink-soft); font-size:15px; cursor:pointer; padding:4px 6px; }
   .bouton-secondaire{ display:block; width:100%; padding:11px; border-radius:10px; border:1px solid var(--green-deep); background:none; color:var(--green-deep); font-size:13.5px; font-weight:500; cursor:pointer; margin-top:4px; }
   .actions-donnees{ display:flex; gap:8px; margin-bottom:12px; }
@@ -392,6 +393,7 @@
     periode: 'mois',
     filtreCategorie: 'toutes',
     filtreRecurrence: 'toutes', // 'toutes' | 'ponctuels' | 'recurrents' — isole les mouvements courants noyés parmi les échéances récurrentes générées
+    objectifsAutoSync: false, // true = objectifs des postes de dépenses recalculés en direct sur les dépenses réelles (voir objectifEffectif)
     archives: [] // années civiles archivées : [{annee, transactions:[...], soldeNet, dateArchivage}]
   };
   // Séparé de `state` à dessein : ne doit jamais se retrouver dans un export JSON/Excel partagé.
@@ -499,6 +501,7 @@
         if(typeof data.objectifEpargne === 'number') state.objectifEpargne = data.objectifEpargne;
         if(typeof data.soldeInitial === 'number') state.soldeInitial = data.soldeInitial;
         if(typeof data.periode === 'string') state.periode = data.periode;
+        if(typeof data.objectifsAutoSync === 'boolean') state.objectifsAutoSync = data.objectifsAutoSync;
         if(Array.isArray(data.archives)) state.archives = data.archives;
         return false;
       }
@@ -562,6 +565,40 @@
       return a.date < b.date ? -1 : 1;
     });
   }
+  // ---------- Objectifs en direct (mode Auto) ----------
+  // % réel de dépense par catégorie, calculé sur l'année civile en cours pour rester une référence
+  // stable indépendante de l'onglet/période consultés (sinon les objectifs « clignoteraient » en
+  // changeant de période) ; repli sur tout l'historique si l'année en cours n'a encore aucune
+  // dépense. Étant une répartition de 100% du total dépensé, la somme retombe toujours pile sur
+  // 100% (l'arrondi éventuel est absorbé par la plus grosse catégorie, même mécanisme que
+  // redistribuerAutresObjectifs).
+  function objectifsActuelsParCategorie(){
+    var anneeActuelle = new Date().getFullYear();
+    var reference = state.transactions.filter(function(t){ return t.type==='sortie' && anneeDe(t)===anneeActuelle; });
+    if(reference.length===0) reference = state.transactions.filter(function(t){ return t.type==='sortie'; });
+    var totalParCat = {}, total = 0;
+    reference.forEach(function(t){ totalParCat[t.categorie] = (totalParCat[t.categorie]||0) + t.montant; total += t.montant; });
+    var resultat = {};
+    if(total<=0 || state.categoriesSortie.length===0) return resultat;
+    state.categoriesSortie.forEach(function(c){ resultat[c.id] = Math.round((totalParCat[c.id]||0) / total * 100); });
+    var somme = state.categoriesSortie.reduce(function(a,c){ return a+(resultat[c.id]||0); }, 0);
+    var ecart = 100 - somme;
+    if(ecart !== 0){
+      var plusGrosseId = state.categoriesSortie.reduce(function(a,c){ return (resultat[c.id]||0) > (resultat[a]||0) ? c.id : a; }, state.categoriesSortie[0].id);
+      resultat[plusGrosseId] = Math.max(0, (resultat[plusGrosseId]||0) + ecart);
+    }
+    return resultat;
+  }
+  // Objectif à afficher/utiliser pour une catégorie : la valeur en direct si le mode Auto est actif
+  // (et qu'une dépense existe pour la calculer), sinon la valeur manuelle enregistrée. N'écrase
+  // jamais c.objectif en mémoire : basculer en Manuel retrouve exactement les valeurs d'origine.
+  function objectifEffectif(c){
+    if(state.objectifsAutoSync){
+      var actuels = objectifsActuelsParCategorie();
+      if(actuels[c.id] !== undefined) return actuels[c.id];
+    }
+    return c.objectif||0;
+  }
   function repartitionParCategorie(){
     var txs = transactionsPeriode().filter(function(t){return t.type==='sortie';});
     var total = txs.reduce(function(a,t){return a+t.montant;},0);
@@ -570,7 +607,7 @@
     return state.categoriesSortie.map(function(cat){
       var montant = map[cat.id] || 0;
       var pct = total>0 ? (montant/total*100) : 0;
-      return {id:cat.id, nom:cat.nom, couleur:cat.couleur, objectif:cat.objectif, montant:montant, pct:pct};
+      return {id:cat.id, nom:cat.nom, couleur:cat.couleur, objectif:objectifEffectif(cat), montant:montant, pct:pct};
     });
   }
   function planOptimisation(){
@@ -921,10 +958,11 @@
 
   // ---------- Rendu : Réglages ----------
   function renderLigneCategorie(c, type){
+    var enModeAuto = type==='sortie' && state.objectifsAutoSync;
     return '<div class="ligne-categorie" data-id="'+c.id+'" data-type="'+type+'">' +
       '<span class="ligne-mvt-tick" style="background:'+c.couleur+'"></span>' +
       '<input class="input-cat-nom" value="'+escapeHtml(c.nom)+'" data-champ="nom">' +
-      (type==='sortie' ? '<input type="number" class="input-cat-objectif" min="0" max="100" value="'+c.objectif+'" data-champ="objectif"><span class="unite">%</span>' : '') +
+      (type==='sortie' ? '<input type="number" class="input-cat-objectif" min="0" max="100" value="'+objectifEffectif(c)+'" data-champ="objectif"'+(enModeAuto?' disabled title="Calculé automatiquement à partir de vos dépenses — repassez en Manuel pour le modifier"':'')+'><span class="unite">%</span>' : '') +
       '<button class="bouton-supprimer-cat" type="button" aria-label="Supprimer">✕</button>' +
     '</div>';
   }
@@ -1056,7 +1094,8 @@
   }
   function renderReglages(){
     var el = document.getElementById('vue-reglages');
-    var sommeObjectifs = state.categoriesSortie.reduce(function(a,c){return a+c.objectif;},0);
+    var modeAuto = !!state.objectifsAutoSync;
+    var sommeObjectifs = state.categoriesSortie.reduce(function(a,c){return a+objectifEffectif(c);},0);
     el.innerHTML =
       '<h2 class="section-titre">Réglages</h2>' +
       '<div class="bloc-reglage"><h3 class="sous-titre">Solde initial</h3>' +
@@ -1067,8 +1106,15 @@
         '<div class="ligne-objectif-epargne"><input type="number" id="input-objectif-epargne" min="0" max="100" step="1" value="'+state.objectifEpargne+'" class="input-nombre"><span class="unite">%</span></div>' +
       '</div>' +
       '<div class="bloc-reglage"><h3 class="sous-titre">Postes de dépenses</h3>' +
-        '<p class="aide-texte">Somme des objectifs : '+sommeObjectifs+'%'+(sommeObjectifs!==100?' (idéalement ≈ 100%)':'')+'</p>' +
-        (sommeObjectifs!==100 ? '<button class="bouton-secondaire" type="button" id="btn-reequilibrer-objectifs" style="margin-bottom:10px">Rééquilibrer à 100%</button>' : '') +
+        '<div class="segment-type segment-type--compact" id="segment-mode-objectifs" role="group" aria-label="Mode des objectifs">' +
+          '<button type="button" data-mode="manuel" class="'+(!modeAuto?'actif':'')+'">Manuel</button>' +
+          '<button type="button" data-mode="auto" class="'+(modeAuto?'actif':'')+'">Auto</button>' +
+        '</div>' +
+        '<p class="aide-texte">'+(modeAuto ?
+          'Objectifs recalculés en direct sur vos dépenses réelles de l\'année (ou tout l\'historique si elle est encore vide) — la somme reste toujours à 100%.' :
+          ('Somme des objectifs : '+sommeObjectifs+'%'+(sommeObjectifs!==100?' (idéalement ≈ 100%)':''))
+        )+'</p>' +
+        (!modeAuto && sommeObjectifs!==100 ? '<button class="bouton-secondaire" type="button" id="btn-reequilibrer-objectifs" style="margin-bottom:10px">Rééquilibrer à 100%</button>' : '') +
         '<div class="liste-categories" id="liste-cat-sortie">' + state.categoriesSortie.map(function(c){return renderLigneCategorie(c,'sortie');}).join('') + '</div>' +
         '<button class="bouton-secondaire" type="button" id="btn-ajouter-cat-sortie">+ Ajouter un poste de dépense</button>' +
       '</div>' +
@@ -1111,6 +1157,16 @@
       state.objectifEpargne = isNaN(v) ? 0 : Math.max(0, Math.min(100, v));
       sauvegarder();
       toast('Objectif mis à jour');
+    });
+    document.getElementById('segment-mode-objectifs').querySelectorAll('button').forEach(function(btn){
+      btn.addEventListener('click', function(){
+        var voulu = btn.dataset.mode === 'auto';
+        if(voulu === !!state.objectifsAutoSync) return;
+        state.objectifsAutoSync = voulu;
+        sauvegarder();
+        renderReglages();
+        toast(voulu ? 'Objectifs synchronisés en direct sur vos dépenses' : 'Retour aux objectifs manuels');
+      });
     });
     var btnReequilibrer = document.getElementById('btn-reequilibrer-objectifs');
     if(btnReequilibrer) btnReequilibrer.addEventListener('click', function(){
@@ -1199,6 +1255,7 @@
         if(Array.isArray(data.categoriesEntree)) state.categoriesEntree = data.categoriesEntree;
         if(typeof data.objectifEpargne==='number') state.objectifEpargne = data.objectifEpargne;
         if(typeof data.soldeInitial==='number') state.soldeInitial = data.soldeInitial;
+        state.objectifsAutoSync = typeof data.objectifsAutoSync==='boolean' ? data.objectifsAutoSync : false;
         state.archives = Array.isArray(data.archives) ? data.archives : [];
         sauvegarder();
         render();
