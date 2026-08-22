@@ -394,7 +394,11 @@
     filtreCategorie: 'toutes',
     filtreRecurrence: 'toutes', // 'toutes' | 'ponctuels' | 'recurrents' — isole les mouvements courants noyés parmi les échéances récurrentes générées
     objectifsAutoSync: false, // true = objectifs des postes de dépenses recalculés en direct sur les dépenses réelles (voir objectifEffectif)
-    archives: [] // années civiles archivées : [{annee, transactions:[...], soldeNet, dateArchivage}]
+    archives: [], // années civiles archivées : [{annee, transactions:[...], soldeNet, dateArchivage}]
+    // Comptes d'épargne : chacun fonctionne comme un mini grand livre autonome, alimenté par son
+    // propre relevé CSV (pas par duplication des virements du compte principal — voir note à
+    // l'import). [{id, nom, couleur, soldeInitial, transactions:[...], dateCreation}]
+    comptes: []
   };
   // Séparé de `state` à dessein : ne doit jamais se retrouver dans un export JSON/Excel partagé.
   var identifiantsCloud = { masterKey: '', binId: '' };
@@ -402,6 +406,7 @@
   var vueActive = 'dashboard';
   var VUES_AVEC_PERIODE = ['dashboard','repartition','optimisation'];
   var anneeArchiveOuverte = null; // état d'affichage (repliable) du détail d'une archive dans Réglages
+  var compteOuvertId = null; // état d'affichage (repliable) du détail d'un compte d'épargne dans Réglages
 
   // ---------- Utilitaires ----------
   function genId(){ return 'id-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2,8); }
@@ -431,7 +436,27 @@
   function getCategorie(id, type){
     var liste = type==='entree' ? state.categoriesEntree : state.categoriesSortie;
     for(var i=0;i<liste.length;i++){ if(liste[i].id===id) return liste[i]; }
+    // Une sortie catégorisée avec l'id d'un compte d'épargne est un virement vers ce compte
+    // (voir remplirCategories) : elle n'a pas d'entrée dans categoriesSortie, on résout ici.
+    if(type==='sortie'){
+      var compte = getCompte(id);
+      if(compte) return {nom:'Virement vers '+compte.nom, couleur:compte.couleur};
+    }
     return {nom:'Catégorie supprimée', couleur:'#8A7F6E'};
+  }
+  // ---------- Comptes d'épargne ----------
+  function getCompte(id){
+    for(var i=0;i<state.comptes.length;i++){ if(state.comptes[i].id===id) return state.comptes[i]; }
+    return null;
+  }
+  // Même logique que soldeGlobal (voir plus bas) : les mouvements datés dans le futur n'impactent
+  // pas encore le solde affiché.
+  function soldeCompte(compte){
+    var aujourdhui = dateLocaleISO();
+    return (compte.transactions||[]).reduce(function(acc,t){
+      if(t.date > aujourdhui) return acc;
+      return acc + (t.type==='entree'? t.montant : -t.montant);
+    }, compte.soldeInitial||0);
   }
 
   // ---------- Stockage ----------
@@ -503,6 +528,7 @@
         if(typeof data.periode === 'string') state.periode = data.periode;
         if(typeof data.objectifsAutoSync === 'boolean') state.objectifsAutoSync = data.objectifsAutoSync;
         if(Array.isArray(data.archives)) state.archives = data.archives;
+        if(Array.isArray(data.comptes)) state.comptes = data.comptes;
         return false;
       }
       return true;
@@ -604,14 +630,27 @@
     var total = txs.reduce(function(a,t){return a+t.montant;},0);
     var map = {};
     txs.forEach(function(t){ map[t.categorie] = (map[t.categorie]||0) + t.montant; });
-    return state.categoriesSortie.map(function(cat){
+    // Un virement vers un compte d'épargne est une sortie (categorie = id du compte, voir
+    // remplirCategories) : sans entrée correspondante ici, son montant gonflerait `total` sans
+    // apparaître dans aucune part, ce qui fausserait tous les pourcentages affichés. On l'ajoute
+    // donc comme catégorie à part entière (estCompte:true, objectif fixe à 0 — voir
+    // planOptimisation qui l'exclut du plan, un objectif à 0% n'y aurait pas de sens).
+    var toutes = state.categoriesSortie.map(function(cat){
+      return {id:cat.id, nom:cat.nom, couleur:cat.couleur, objectif:objectifEffectif(cat), estCompte:false};
+    }).concat(state.comptes.map(function(c){
+      return {id:c.id, nom:'Virement vers '+c.nom, couleur:c.couleur, objectif:0, estCompte:true};
+    }));
+    return toutes.map(function(cat){
       var montant = map[cat.id] || 0;
       var pct = total>0 ? (montant/total*100) : 0;
-      return {id:cat.id, nom:cat.nom, couleur:cat.couleur, objectif:objectifEffectif(cat), montant:montant, pct:pct};
+      return {id:cat.id, nom:cat.nom, couleur:cat.couleur, objectif:cat.objectif, montant:montant, pct:pct, estCompte:cat.estCompte};
     });
   }
   function planOptimisation(){
-    return repartitionParCategorie().map(function(c){
+    // Les virements vers un compte d'épargne sont exclus du plan d'optimisation : ils sont déjà
+    // valorisés globalement par la carte « Taux d'épargne » (montantEpargnePeriode les compte),
+    // et une carte individuelle avec un objectif à 0% n'aurait pas de sens ici.
+    return repartitionParCategorie().filter(function(c){ return !c.estCompte; }).map(function(c){
       return {id:c.id, nom:c.nom, couleur:c.couleur, objectif:c.objectif, montant:c.montant, pct:c.pct, ecart:c.pct - c.objectif};
     }).sort(function(a,b){ return b.ecart - a.ecart; });
   }
@@ -619,8 +658,10 @@
   // des sorties prises en compte pour le taux d'épargne réel, sinon un virement vers l'épargne fait
   // mécaniquement baisser ce taux alors qu'il traduit l'inverse (cf. incohérence -8,9% vs carte
   // Épargne à 47% du plan d'optimisation, qui elle raisonne déjà correctement par catégorie).
+  // Même raisonnement pour un virement vers un compte d'épargne (catégorie = id du compte, voir
+  // remplirCategories) : c'est aussi de l'épargne, pas une dépense.
   function montantEpargnePeriode(){
-    return transactionsPeriode().filter(function(t){ return t.type==='sortie' && t.categorie==='epargne'; })
+    return transactionsPeriode().filter(function(t){ return t.type==='sortie' && (t.categorie==='epargne' || getCompte(t.categorie)!==null); })
       .reduce(function(a,t){ return a+t.montant; }, 0);
   }
   function epargneNettePeriode(){
@@ -804,6 +845,17 @@
       (reste>0 ? '<p class="aide-texte" style="text-align:center;margin-top:-4px">+ '+reste+' autre'+(reste>1?'s':'')+'</p>' : '');
   }
 
+  // ---------- Rendu : Comptes d'épargne (résumé Dashboard) ----------
+  function renderBlocComptesDashboard(){
+    if(state.comptes.length===0) return '';
+    return '<div class="section-titre-ligne"><h2 class="section-titre">Comptes d\'épargne</h2><button class="lien-voir-tout" type="button" data-nav="reglages">Gérer</button></div>' +
+      '<div class="grille-stats" style="margin-bottom:20px">' + state.comptes.map(function(c){
+        var solde = soldeCompte(c);
+        var positif = solde>=0;
+        return '<div class="carte-stat"><p class="carte-stat-label">'+escapeHtml(c.nom)+'</p><p class="carte-stat-valeur '+(positif?'ink-credit':'ink-debit')+'">'+formatMontant(solde)+'</p></div>';
+      }).join('') + '</div>';
+  }
+
   // ---------- Rendu : Dashboard ----------
   function renderDashboard(){
     var solde = soldeGlobal();
@@ -823,11 +875,14 @@
         '<div class="carte-stat"><p class="carte-stat-label">Entrées · '+libellePeriode()+'</p><p class="carte-stat-valeur ink-credit">+'+formatMontant(t.entrees)+'</p></div>' +
         '<div class="carte-stat"><p class="carte-stat-label">Sorties · '+libellePeriode()+'</p><p class="carte-stat-valeur ink-debit">-'+formatMontant(t.sorties)+'</p></div>' +
       '</div>' +
+      renderBlocComptesDashboard() +
       renderBlocEcheances(echeances) +
       '<div class="section-titre-ligne"><h2 class="section-titre">Derniers mouvements</h2><button class="lien-voir-tout" type="button" data-nav="mouvements">Tout voir</button></div>' +
       renderListeMouvements(recents);
     var lien = el.querySelector('[data-nav="mouvements"]');
     if(lien) lien.addEventListener('click', function(){ changerVue('mouvements'); });
+    var lienComptes = el.querySelector('[data-nav="reglages"]');
+    if(lienComptes) lienComptes.addEventListener('click', function(){ changerVue('reglages'); });
     attacherClicsLignes(el);
   }
 
@@ -840,7 +895,9 @@
     if(filtreCat !== 'toutes'){ txs = txs.filter(function(t){ return t.categorie===filtreCat; }); }
     if(filtreRec === 'ponctuels'){ txs = txs.filter(function(t){ return !t.recurrent; }); }
     else if(filtreRec === 'recurrents'){ txs = txs.filter(function(t){ return !!t.recurrent; }); }
-    var toutesCats = state.categoriesSortie.concat(state.categoriesEntree);
+    var toutesCats = state.categoriesSortie.concat(state.categoriesEntree).concat(
+      state.comptes.map(function(c){ return {id:c.id, nom:'Virement vers '+c.nom}; })
+    );
     var filtreActif = (filtreCat !== 'toutes') || (filtreRec !== 'toutes');
     var resumeHtml = '';
     if(txs.length>0){
@@ -1092,6 +1149,41 @@
     html += '</div>';
     return html;
   }
+  function renderBlocComptes(){
+    var html = '<div class="bloc-reglage"><h3 class="sous-titre">Comptes d\'épargne</h3>' +
+      '<p class="aide-texte">Importez le relevé CSV propre à un compte d\'épargne pour créer son propre grand livre (solde, historique). Vos virements deviennent ensuite sélectionnables comme catégorie de sortie « Virement vers … » et comptent comme épargne dans votre taux réel.</p>';
+    if(state.comptes.length===0){
+      html += '<p class="aide-texte">Aucun compte d\'épargne pour le moment.</p>';
+    } else {
+      html += '<div class="liste-archives">' + state.comptes.map(function(c){
+        var ouvert = compteOuvertId===c.id;
+        var solde = soldeCompte(c);
+        var soldePositif = solde>=0;
+        return '<div class="ligne-archive ligne-archive--archivee">' +
+          '<button type="button" class="ligne-archive-entete" data-action="basculer-compte" data-id="'+c.id+'">' +
+            '<span class="ligne-archive-annee" style="color:'+c.couleur+'">'+escapeHtml(c.nom)+'</span>' +
+            '<span class="ligne-archive-info '+(soldePositif?'ink-credit':'ink-debit')+'">'+formatMontant(solde)+'</span>' +
+          '</button>' +
+          (ouvert ? (
+            '<div class="detail-archive">' +
+              '<label class="etiquette-champ">Nom du compte' +
+                '<input type="text" class="input-texte" data-champ-compte="nom" data-id="'+c.id+'" value="'+escapeHtml(c.nom)+'"></label>' +
+              '<label class="etiquette-champ" style="margin-top:8px">Solde initial (avant le premier mouvement importé)' +
+                '<input type="text" inputmode="decimal" class="input-montant-champ" data-champ-compte="soldeInitial" data-id="'+c.id+'" value="'+String(c.soldeInitial||0).replace('.',',')+'" style="width:140px"></label>' +
+              '<div style="margin-top:12px">' + renderListeMouvements((c.transactions||[]).slice().sort(trierParDateDesc), false, 'Ce compte est vierge.', 'Importez un relevé pour commencer.') + '</div>' +
+              '<button class="bouton-secondaire" type="button" data-action="import-compte" data-id="'+c.id+'">Importer un relevé (CSV)</button>' +
+              '<input type="file" class="input-import-compte-csv" data-id="'+c.id+'" accept=".csv,text/csv" style="display:none">' +
+              '<button class="bouton-danger" type="button" data-action="supprimer-compte" data-id="'+c.id+'" style="margin-top:8px">Supprimer ce compte</button>' +
+            '</div>'
+          ) : '') +
+        '</div>';
+      }).join('') + '</div>';
+    }
+    html += '<button class="bouton-secondaire" type="button" id="btn-nouveau-compte-epargne">+ Nouveau compte d\'épargne (import CSV)</button>' +
+      '<input type="file" id="input-nouveau-compte-csv" accept=".csv,text/csv" style="display:none">' +
+    '</div>';
+    return html;
+  }
   function renderReglages(){
     var el = document.getElementById('vue-reglages');
     var modeAuto = !!state.objectifsAutoSync;
@@ -1132,6 +1224,7 @@
         '<input type="file" id="input-import-fichier" accept="application/json" style="display:none">' +
         '<button class="bouton-danger" type="button" id="btn-effacer-tout">Effacer toutes les données</button>' +
       '</div>' +
+      renderBlocComptes() +
       renderBlocArchives() +
       '<div class="bloc-reglage"><h3 class="sous-titre">Synchronisation cloud (JSONBin)</h3>' +
         '<p class="aide-texte">Pour retrouver vos données sur un autre appareil. Compte gratuit sur jsonbin.io, puis collez votre clé X-Master-Key ci-dessous.</p>' +
@@ -1225,6 +1318,44 @@
     });
     document.getElementById('btn-jsonbin-envoyer').addEventListener('click', envoyerVersJsonBin);
     document.getElementById('btn-jsonbin-recuperer').addEventListener('click', recupererDepuisJsonBin);
+    el.querySelectorAll('[data-action="basculer-compte"]').forEach(function(btn){
+      btn.addEventListener('click', function(){
+        var id = btn.dataset.id;
+        compteOuvertId = (compteOuvertId===id) ? null : id;
+        renderReglages();
+      });
+    });
+    el.querySelectorAll('[data-champ-compte]').forEach(function(input){
+      input.addEventListener('change', function(){
+        var compte = getCompte(input.dataset.id);
+        if(!compte) return;
+        var champ = input.dataset.champCompte;
+        if(champ==='nom'){
+          var nomTrim = input.value.trim();
+          if(nomTrim) compte.nom = nomTrim;
+        }
+        if(champ==='soldeInitial'){
+          var v = parseMontant(input.value);
+          compte.soldeInitial = isNaN(v) ? 0 : v;
+        }
+        sauvegarder();
+        renderReglages();
+        toast('Compte mis à jour');
+      });
+    });
+    el.querySelectorAll('[data-action="import-compte"]').forEach(function(btn){
+      btn.addEventListener('click', function(){
+        el.querySelector('.input-import-compte-csv[data-id="'+btn.dataset.id+'"]').click();
+      });
+    });
+    el.querySelectorAll('.input-import-compte-csv').forEach(function(input){
+      input.addEventListener('change', function(e){ importerCsvDansCompte(e, input.dataset.id); });
+    });
+    el.querySelectorAll('[data-action="supprimer-compte"]').forEach(function(btn){
+      btn.addEventListener('click', function(){ supprimerCompte(btn.dataset.id); });
+    });
+    document.getElementById('btn-nouveau-compte-epargne').addEventListener('click', function(){ document.getElementById('input-nouveau-compte-csv').click(); });
+    document.getElementById('input-nouveau-compte-csv').addEventListener('change', importerNouveauCompteCSV);
   }
 
   // ---------- Export / Import / Reset ----------
@@ -1257,6 +1388,7 @@
         if(typeof data.soldeInitial==='number') state.soldeInitial = data.soldeInitial;
         state.objectifsAutoSync = typeof data.objectifsAutoSync==='boolean' ? data.objectifsAutoSync : false;
         state.archives = Array.isArray(data.archives) ? data.archives : [];
+        state.comptes = Array.isArray(data.comptes) ? data.comptes : [];
         sauvegarder();
         render();
         toast('Import réussi');
@@ -1271,6 +1403,7 @@
     if(!confirm('Effacer définitivement toutes les transactions ? Cette action est irréversible.')) return;
     state.transactions = [];
     state.archives = [];
+    state.comptes = [];
     sauvegarder();
     render();
     toast('Données effacées');
@@ -1446,6 +1579,7 @@
       if(Array.isArray(recu.categoriesEntree)) state.categoriesEntree = recu.categoriesEntree;
       if(typeof recu.objectifEpargne === 'number') state.objectifEpargne = recu.objectifEpargne;
       if(typeof recu.soldeInitial === 'number') state.soldeInitial = recu.soldeInitial;
+      if(Array.isArray(recu.comptes)) state.comptes = recu.comptes;
       sauvegarder();
       render();
       toast('Données récupérées depuis le cloud');
@@ -1560,6 +1694,81 @@
     };
     lecteur.readAsText(fichier, 'UTF-8');
     e.target.value = '';
+  }
+
+  // ---------- Import CSV vers un compte d'épargne ----------
+  // Ces trois fonctions réutilisent volontairement analyserReleveCSV/signatureTransaction tels
+  // quels : un compte d'épargne fonctionne comme un second grand livre indépendant, alimenté par
+  // SON PROPRE relevé bancaire (celui du compte d'épargne lui-même, pas celui du compte courant).
+  // On ne recrée donc jamais artificiellement côté compte le virement déjà présent côté grand
+  // livre principal (categorie = id du compte, voir remplirCategories) : ce serait compter deux
+  // fois le même mouvement. Le lien entre les deux reste un simple étiquetage, pas une double
+  // écriture automatique.
+  function importerNouveauCompteCSV(e){
+    var fichier = e.target.files[0];
+    if(!fichier) return;
+    var lecteur = new FileReader();
+    lecteur.onload = function(evt){
+      var transactions = analyserReleveCSV(evt.target.result);
+      if(transactions === null){ toast('Format de relevé non reconnu'); e.target.value=''; return; }
+      if(transactions.length === 0){ toast('Aucun mouvement trouvé dans ce fichier'); e.target.value=''; return; }
+      var nom = prompt('Nom du nouveau compte d\'épargne :', 'Livret');
+      if(!nom || !nom.trim()){ e.target.value=''; return; }
+      var compte = {
+        id: genId(),
+        nom: nom.trim(),
+        couleur: PALETTE_CATEGORIES[state.comptes.length % PALETTE_CATEGORIES.length],
+        soldeInitial: 0,
+        transactions: transactions,
+        dateCreation: dateLocaleISO()
+      };
+      state.comptes.push(compte);
+      compteOuvertId = compte.id;
+      sauvegarder();
+      renderReglages();
+      render();
+      toast('Compte « '+compte.nom+' » créé avec '+transactions.length+' mouvement(s)');
+      e.target.value = '';
+    };
+    lecteur.readAsText(fichier, 'UTF-8');
+  }
+  function importerCsvDansCompte(e, compteId){
+    var fichier = e.target.files[0];
+    if(!fichier) return;
+    var lecteur = new FileReader();
+    lecteur.onload = function(evt){
+      var compte = getCompte(compteId);
+      if(!compte){ e.target.value=''; return; }
+      var transactions = analyserReleveCSV(evt.target.result);
+      if(transactions === null){ toast('Format de relevé non reconnu'); e.target.value=''; return; }
+      if(transactions.length === 0){ toast('Aucun mouvement trouvé dans ce fichier'); e.target.value=''; return; }
+      var signaturesExistantes = {};
+      (compte.transactions||[]).forEach(function(t){ signaturesExistantes[signatureTransaction(t)] = true; });
+      var nouvelles = transactions.filter(function(t){ return !signaturesExistantes[signatureTransaction(t)]; });
+      var doublons = transactions.length - nouvelles.length;
+      if(nouvelles.length===0){ toast('Tous les mouvements de ce fichier sont déjà importés'); e.target.value=''; return; }
+      var message = nouvelles.length+' mouvement(s) à importer dans « '+compte.nom+' »'+(doublons>0? ' ('+doublons+' déjà présents, ignorés)':'')+'. Continuer ?';
+      if(!confirm(message)){ e.target.value=''; return; }
+      compte.transactions = (compte.transactions||[]).concat(nouvelles);
+      sauvegarder();
+      renderReglages();
+      render();
+      toast(nouvelles.length+' mouvement(s) importé(s) dans « '+compte.nom+' »');
+      e.target.value = '';
+    };
+    lecteur.readAsText(fichier, 'UTF-8');
+  }
+  function supprimerCompte(id){
+    var compte = getCompte(id);
+    if(!compte) return;
+    var enUsage = state.transactions.some(function(t){ return t.type==='sortie' && t.categorie===id; });
+    if(enUsage){ toast('Des virements de votre grand livre pointent vers ce compte — recatégorisez-les avant de le supprimer'); return; }
+    if(!confirm('Supprimer le compte « '+compte.nom+' » et tout son historique ? Cette action est irréversible.')) return;
+    state.comptes = state.comptes.filter(function(c){ return c.id!==id; });
+    if(compteOuvertId===id) compteOuvertId = null;
+    sauvegarder();
+    renderReglages();
+    toast('Compte supprimé');
   }
 
   var RELEVE_INITIAL = `"Date operation";"Date valeur";"Libelle";"Debit";"Credit"
@@ -1701,7 +1910,16 @@
   function remplirCategories(type){
     var select = document.getElementById('input-categorie');
     var cats = type==='sortie' ? state.categoriesSortie : state.categoriesEntree;
-    select.innerHTML = cats.map(function(c){ return '<option value="'+c.id+'">'+escapeHtml(c.nom)+'</option>'; }).join('');
+    var html = cats.map(function(c){ return '<option value="'+c.id+'">'+escapeHtml(c.nom)+'</option>'; }).join('');
+    // Chaque compte d'épargne devient un item sélectionnable pour catégoriser une sortie comme
+    // virement vers ce compte précis (au lieu du générique « Virements ») — voir getCategorie et
+    // montantEpargnePeriode pour la résolution du libellé et la prise en compte comme épargne.
+    if(type==='sortie' && state.comptes.length>0){
+      html += '<optgroup label="Virement vers un compte d\'épargne">' +
+        state.comptes.map(function(c){ return '<option value="'+c.id+'">'+escapeHtml(c.nom)+'</option>'; }).join('') +
+      '</optgroup>';
+    }
+    select.innerHTML = html;
   }
   function ouvrirModal(transactionId){
     var modal = document.getElementById('modal-transaction');
