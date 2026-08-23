@@ -544,20 +544,17 @@
         if(typeof data.objectifsAutoSync === 'boolean') state.objectifsAutoSync = data.objectifsAutoSync;
         if(Array.isArray(data.archives)) state.archives = data.archives;
         if(Array.isArray(data.comptes)) state.comptes = data.comptes;
-        return false;
       }
-      return true;
-    }).catch(function(){
-      console.log('Aucune donnée existante, initialisation par défaut.');
-      return true;
-    }).then(function(doitAmorcer){
-      if(doitAmorcer){
-        var transactionsInitiales = analyserReleveCSV(RELEVE_INITIAL);
-        if(transactionsInitiales && transactionsInitiales.length>0){
-          state.transactions = transactionsInitiales;
-          return sauvegarder();
-        }
-      }
+      // Ni donnée existante, ni erreur : vrai premier lancement — state garde ses valeurs par défaut
+      // (transactions vides). On n'amorce plus JAMAIS avec un relevé figé en dur dans le code : ce
+      // mécanisme réinjectait d'anciennes lignes réelles par-dessus les vraies données à chaque
+      // incident de stockage (sans la moindre détection de doublon, contrairement à un import CSV
+      // normal), et en est la cause la plus probable des écarts de solde répétés.
+    }).catch(function(e){
+      console.error('Erreur au chargement des données', e);
+      // Une lecture en échec ne doit JAMAIS être traitée comme « aucune donnée » : mieux vaut laisser
+      // l'état tel quel (et prévenir) que risquer d'écraser ensuite de vraies données avec un état vide.
+      toast('Chargement indisponible — vos données n\'ont peut-être pas pu être récupérées. Réessayez, ou utilisez Récupérer depuis le cloud dans Réglages.');
     });
   }
 
@@ -694,13 +691,9 @@
   // - hebdomadaire/mensuel/trimestriel/semestriel : jusqu'à décembre inclus de l'année civile de la
   //   date saisie (même jour du mois pour les fréquences mensuelles, ramené au dernier jour si le
   //   mois est plus court). C'est le mécanisme mensuel déjà validé, généralisé à un pas variable.
-  // - annuel : CORRIGÉ — borné à l'année civile EN COURS comme les autres fréquences, au lieu de
-  //   systématiquement projeter date+1 an. L'ancien comportement générait, dès la saisie d'une charge
-  //   annuelle en 2026, une occurrence datée 2027 (visible immédiatement dans Mouvements et dans les
-  //   totaux « Tout » du Dashboard, alors qu'on n'était même pas encore en 2027). Si la date de base
-  //   est ancienne (conversion d'un mouvement passé en récurrent), on rattrape toutes les échéances
-  //   annuelles dues jusqu'à l'année en cours incluse — même logique de rattrapage que
-  //   synchroniserRecurrences, ici appliquée dès la création/conversion plutôt qu'au démarrage suivant.
+  // - annuel : un cycle annuel ne repasse par définition jamais avant le 31/12 de l'année en cours,
+  //   donc le plafond « fin d'année civile » n'a pas de sens ici ; on projette la seule prochaine
+  //   échéance, un an jour pour jour après la saisie.
   // Ces occurrences futures s'intègrent naturellement à Répartition/Optimisation (période « Cette
   // année » ou « Tout ») mais n'impactent pas le solde tant que leur date n'est pas atteinte.
   function fabriquerOccurrence(base, dateOccurrence){
@@ -725,12 +718,8 @@
     }
 
     if(frequence === 'annuel'){
-      var anneeActuelleAnnuel = new Date().getFullYear();
-      var curseurAnnuel = new Date(d0.getFullYear(), d0.getMonth(), d0.getDate());
-      while(curseurAnnuel.getFullYear() < anneeActuelleAnnuel){
-        curseurAnnuel = new Date(curseurAnnuel.getFullYear()+1, curseurAnnuel.getMonth(), curseurAnnuel.getDate());
-        occurrences.push(fabriquerOccurrence(base, dateLocaleISO(curseurAnnuel)));
-      }
+      var dSuivante = new Date(d0.getFullYear()+1, d0.getMonth(), d0.getDate());
+      occurrences.push(fabriquerOccurrence(base, dateLocaleISO(dSuivante)));
       return occurrences;
     }
 
@@ -760,11 +749,22 @@
   function synchroniserRecurrences(){
     var anneeActuelle = new Date().getFullYear();
     var series = {};
+    // Clé recurrenceId+date déjà présente dans les données : vérifiée avant CHAQUE ajout, en plus du
+    // test « déjà à jour » par année — aucune occurrence n'est jamais ajoutée deux fois pour la même
+    // série à la même date, quel que soit le nombre de fois où cette fonction est appelée.
+    var existantes = {};
     state.transactions.forEach(function(t){
       if(!t.recurrenceId) return;
       (series[t.recurrenceId] = series[t.recurrenceId] || []).push(t);
+      existantes[t.recurrenceId+'|'+t.date] = true;
     });
     var ajouts = [];
+    function ajouterSiAbsente(rid, dateOcc, base){
+      var cle = rid+'|'+dateOcc;
+      if(existantes[cle]) return;
+      existantes[cle] = true;
+      ajouts.push(fabriquerOccurrence(base, dateOcc));
+    }
     Object.keys(series).forEach(function(rid){
       var occs = series[rid];
       var derniere = occs.reduce(function(a,b){ return a.date > b.date ? a : b; });
@@ -778,7 +778,7 @@
         var curseurH = new Date(derniere.date+'T00:00:00');
         curseurH = new Date(curseurH.getFullYear(), curseurH.getMonth(), curseurH.getDate()+7);
         while(curseurH.getFullYear() <= anneeActuelle){
-          ajouts.push(fabriquerOccurrence(base, dateLocaleISO(curseurH)));
+          ajouterSiAbsente(rid, dateLocaleISO(curseurH), base);
           curseurH = new Date(curseurH.getFullYear(), curseurH.getMonth(), curseurH.getDate()+7);
         }
         return;
@@ -787,7 +787,7 @@
         var curseurA = new Date(derniere.date+'T00:00:00');
         while(curseurA.getFullYear() < anneeActuelle){
           curseurA = new Date(curseurA.getFullYear()+1, curseurA.getMonth(), curseurA.getDate());
-          ajouts.push(fabriquerOccurrence(base, dateLocaleISO(curseurA)));
+          ajouterSiAbsente(rid, dateLocaleISO(curseurA), base);
         }
         return;
       }
@@ -803,31 +803,31 @@
         var dernierJourMois = new Date(curseurAnnee, curseurMois+1, 0).getDate();
         var jour = Math.min(jourCible, dernierJourMois);
         var dateOcc = curseurAnnee + '-' + String(curseurMois+1).padStart(2,'0') + '-' + String(jour).padStart(2,'0');
-        ajouts.push(fabriquerOccurrence(base, dateOcc));
+        ajouterSiAbsente(rid, dateOcc, base);
         curseurMois += pas;
       }
     });
     if(ajouts.length>0) state.transactions = state.transactions.concat(ajouts);
     return ajouts.length;
   }
-
-  // ---------- Correctif : occurrences générées trop tôt ----------
-  // Avant correction, une charge/recette « annuelle » projetait systématiquement une occurrence à
-  // date+1 an dès sa création ou sa conversion (voir genererOccurrencesRecurrentes), ce qui a pu
-  // laisser des mouvements datés au-delà de l'année en cours (ex. 2027 alors qu'on est en 2026) dans
-  // des données déjà enregistrées. Cette fonction, appelée une fois à chaque démarrage, retire toute
-  // occurrence dérivée (recurrent, id différent de recurrenceId) dont l'année dépasse l'année civile
-  // en cours — elle sera régénérée au bon moment par synchroniserRecurrences le moment venu. Ne touche
-  // jamais le mouvement de base d'une série (id === recurrenceId), ni un mouvement non récurrent.
-  // Idempotent : une fois les données assainies, ne retrouve plus rien à retirer.
-  function purgerOccurrencesHorsAnnee(){
-    var anneeActuelle = new Date().getFullYear();
-    var avant = state.transactions.length;
-    state.transactions = state.transactions.filter(function(t){
-      var estOccurrenceDerivee = !!t.recurrenceId && t.id !== t.recurrenceId;
-      return !(estOccurrenceDerivee && anneeDe(t) > anneeActuelle);
+  // Nettoyage : supprime les occurrences en double d'une même série récurrente à la même date
+  // (même recurrenceId + même date), quelle qu'en soit l'origine — génération accidentelle avant
+  // le renfort ci-dessus, fusion de données via la sync cloud, etc. Conserve systématiquement la
+  // plus ancienne (id le plus petit, genId() étant basé sur l'horodatage de création) et supprime
+  // les suivantes. Un mouvement ponctuel (sans recurrenceId) n'est jamais concerné.
+  function dedupliquerRecurrences(){
+    var vues = {};
+    var gardees = [];
+    var supprimees = 0;
+    state.transactions.slice().sort(function(a,b){ return a.id<b.id?-1:(a.id>b.id?1:0); }).forEach(function(t){
+      if(!t.recurrenceId){ gardees.push(t); return; }
+      var cle = t.recurrenceId+'|'+t.date;
+      if(vues[cle]){ supprimees++; return; }
+      vues[cle] = true;
+      gardees.push(t);
     });
-    return avant - state.transactions.length;
+    if(supprimees>0) state.transactions = gardees;
+    return supprimees;
   }
 
   // ---------- Archivage annuel ----------
@@ -1025,7 +1025,11 @@
 
     var filtreCat = state.filtreCategorie || 'toutes';
     var filtreRec = state.filtreRecurrence || 'toutes';
-    var txs = state.transactions.slice().sort(trierParDateDesc);
+    var anneeActuelleMvts = new Date().getFullYear();
+    // Mouvements affiche l'année en cours uniquement — le passé a sa place dans Archives, et le
+    // futur (ex. la prochaine échéance d'une série annuelle, mécaniquement datée l'an prochain)
+    // dans Échéances à venir sur le Dashboard, pas ici.
+    var txs = state.transactions.filter(function(t){ return anneeDe(t)===anneeActuelleMvts; }).sort(trierParDateDesc);
     if(filtreCat !== 'toutes'){ txs = txs.filter(function(t){ return t.categorie===filtreCat; }); }
     if(filtreRec === 'ponctuels'){ txs = txs.filter(function(t){ return !t.recurrent; }); }
     else if(filtreRec === 'recurrents'){
@@ -1943,141 +1947,6 @@
     toast('Compte supprimé');
   }
 
-  var RELEVE_INITIAL = `"Date operation";"Date valeur";"Libelle";"Debit";"Credit"
-"07/08/2026";"07/08/2026";"CARTE 06/08 STATION U 35 ST JACQUES";"57,02";""
-"06/08/2026";"06/08/2026";"CARTE 05/08 SAS NICAR RENNES";"43,73";""
-"06/08/2026";"06/08/2026";"VIR de LIVRET CMB";"";"200,00"
-"06/08/2026";"06/08/2026";"CARTE 05/08 SAS NICAR RENNES";"23,93";""
-"05/08/2026";"05/08/2026";"CARTE 04/08 IKEA RENNES PACE";"62,98";""
-"05/08/2026";"05/08/2026";"vers LIVRET CMB";"27,01";""
-"05/08/2026";"05/08/2026";"VIR de COMPTE CHEQUES 1";"";"110,90"
-"05/08/2026";"05/08/2026";"PRLV Free Telecom";"87,97";""
-"05/08/2026";"05/08/2026";"CARTE 04/08 Sikkens Rennes O RENNES";"91,27";""
-"05/08/2026";"05/08/2026";"CARTE 04/08 SumUp  *RATOVOND DINARD";"10,00";""
-"05/08/2026";"05/08/2026";"vers LIVRET CMB";"50,00";""
-"05/08/2026";"05/08/2026";"PRLV SPL EAU DU BASSIN RENNAIS";"35,00";""
-"05/08/2026";"05/08/2026";"PRLV MMA IARD SA";"109,65";""
-"05/08/2026";"05/08/2026";"vers LIVRET CMB";"16,38";""
-"05/08/2026";"05/08/2026";"vers LIVRET CMB";"16,00";""
-"05/08/2026";"05/08/2026";"vers LIVRET CMB";"27,27";""
-"05/08/2026";"05/08/2026";"vers LIVRET CMB";"13,41";""
-"05/08/2026";"05/08/2026";"PRLV L ATELIER D AMARANTE";"184,95";""
-"05/08/2026";"05/08/2026";"VIR vers JUTGE NELLY";"2,00";""
-"05/08/2026";"05/08/2026";"VIR de LIVRET CMB";"";"200,00"
-"05/08/2026";"05/08/2026";"vers LIVRET CMB";"55,00";""
-"05/08/2026";"05/08/2026";"vers LIVRET CMB";"25,00";""
-"05/08/2026";"05/08/2026";"vers LIVRET CMB";"70,00";""
-"05/08/2026";"05/08/2026";"vers LIVRET CMB";"27,27";""
-"05/08/2026";"05/08/2026";"vers LIVRET CMB";"199,00";""
-"05/08/2026";"05/08/2026";"vers LIVRET CMB";"138,89";""
-"04/08/2026";"05/08/2026";"ECH PRET 0106358294303";"462,15";""
-"04/08/2026";"04/08/2026";"VIR vers JUTGE NELLY";"10,00";""
-"04/08/2026";"04/08/2026";"CARTE 03/08 L'INCROYABLE DENAIN";"11,98";""
-"04/08/2026";"04/08/2026";"CARTE 03/08 B&M RENNES";"7,18";""
-"04/08/2026";"04/08/2026";"VIR de LIVRET CMB";"";"300,00"
-"04/08/2026";"05/08/2026";"ECH PRET 0106358294302";"66,18";""
-"04/08/2026";"04/08/2026";"PRLV CANAL+ France";"7,00";""
-"04/08/2026";"04/08/2026";"VIR de LIVRET CMB";"";"150,00"
-"03/08/2026";"03/08/2026";"VIR vers JUTGE NELLY";"10,00";""
-"03/08/2026";"03/08/2026";"VIR de LIVRET CMB";"";"100,00"
-"03/08/2026";"03/08/2026";"CARTE 01/08 E.LECLERC RENNES";"21,34";""
-"03/08/2026";"03/08/2026";"CARTE 01/08 MP*CARREFOUR DAC PORNICHET";"55,98";""
-"03/08/2026";"02/08/2026";"CARTE 31/07 BISC PORNICHET PORNICHET";"12,80";""
-"02/08/2026";"02/08/2026";"VIR INST vers JUTGE NICOLAS";"2,00";""
-"02/08/2026";"02/08/2026";"VIR vers JUTGE NELLY";"68,04";""
-"01/08/2026";"01/08/2026";"CARTE 31/07 HEDGARD PORNICHET";"18,00";""
-"01/08/2026";"01/08/2026";"CARTE 31/07 SARL MAMITO LA CHAPELLE S";"20,00";""
-"01/08/2026";"01/08/2026";"vers ALVAREZ MARIE";"60,00";""
-"01/08/2026";"01/08/2026";"CARTE 31/07 BERNARD L'HERMI PORNICHET";"6,90";""
-"31/07/2026";"31/07/2026";"PRLV Bouygues Telecom";"9,99";""
-"31/07/2026";"31/07/2026";"CARTE 30/07 ST NAZ RENVERSAN ST NAZAIRE";"4,00";""
-"31/07/2026";"31/07/2026";"PRLV Bouygues Telecom";"9,99";""
-"31/07/2026";"31/07/2026";"CARTE 29/07 LE RALLI PORNICHET";"16,00";""
-"31/07/2026";"31/07/2026";"VIR de LIVRET CMB";"";"150,00"
-"31/07/2026";"31/07/2026";"PRLV Bouygues Telecom";"9,99";""
-"31/07/2026";"31/07/2026";"PRLV Bouygues Telecom";"9,99";""
-"31/07/2026";"31/07/2026";"VIR vers JUTGE NELLY";"33,85";""
-"31/07/2026";"31/07/2026";"CARTE 30/07 NORMAL SAINT-NA Saint-nazaire";"4,10";""
-"31/07/2026";"31/07/2026";"PRLV SURAVENIR";"552,00";""
-"29/07/2026";"29/07/2026";"VIR vers JUTGE NELLY";"15,00";""
-"29/07/2026";"29/07/2026";"VIR de COMPTE CHEQUES 1";"";"922,00"
-"29/07/2026";"29/07/2026";"VIR vers JUTGE NELLY";"15,90";""
-"28/07/2026";"28/07/2026";"PRLV ALPIQ";"55,98";""
-"28/07/2026";"28/07/2026";"CARTE 27/07 les gars de la PORNICHET";"16,10";""
-"28/07/2026";"28/07/2026";"CARTE 27/07 LE RALLI PORNICHET";"7,40";""
-"28/07/2026";"28/07/2026";"CARTE 27/07 SPL PORNICHET PORNICHET";"3,60";""
-"28/07/2026";"28/07/2026";"CARTE 26/07 L EXPRESS CAFE PORNICHET";"15,60";""
-"28/07/2026";"28/07/2026";"VIR vers JUTGE NELLY";"7,20";""
-"28/07/2026";"28/07/2026";"PRLV DeezerFR";"19,99";""
-"28/07/2026";"28/07/2026";"CARTE 27/07 HEDGARD PORNICHET";"18,00";""
-"27/07/2026";"27/07/2026";"VIR vers JUTGE NELLY";"11,90";""
-"27/07/2026";"27/07/2026";"CARTE 25/07 PHARMACIE COLOMB RENNES";"15,26";""
-"27/07/2026";"26/07/2026";"CARTE 25/07 PELTIER NOYAL SUR VIL";"22,38";""
-"27/07/2026";"27/07/2026";"VIR M JUTGE NICOLAS";"";"214,80"
-"27/07/2026";"27/07/2026";"VIR M JUTGE NICOLAS";"";"912,00"
-"27/07/2026";"27/07/2026";"VIR M JUTGE NICOLAS";"";"9,99"
-"27/07/2026";"27/07/2026";"VIR M JUTGE NICOLAS";"";"7,17"
-"27/07/2026";"27/07/2026";"VIR M JUTGE NICOLAS";"";"1,41"
-"27/07/2026";"27/07/2026";"CARTE 26/07 SPL PORNICHET PORNICHET";"2,00";""
-"27/07/2026";"27/07/2026";"VIR M JUTGE NICOLAS";"";"1,99"
-"27/07/2026";"27/07/2026";"VIR M JUTGE NICOLAS";"";"21,99"
-"27/07/2026";"27/07/2026";"VIR M JUTGE NICOLAS";"";"4,38"
-"27/07/2026";"27/07/2026";"VIR INST vers JUTGE NICOLAS";"157,00";""
-"27/07/2026";"27/07/2026";"CARTE 26/07 Carte Ticket Res Montrouge";"0,01";""
-"27/07/2026";"26/07/2026";"CARTE 25/07 TABAC COURROUZE RENNES";"26,00";""
-"27/07/2026";"26/07/2026";"CARTE 25/07 MANIERE PRIMEUR BREAL SOUS MO";"11,13";""
-"27/07/2026";"27/07/2026";"VIR M JUTGE NICOLAS";"";"7,00"
-"27/07/2026";"27/07/2026";"VIR M JUTGE NICOLAS";"";"5,00"
-"27/07/2026";"27/07/2026";"VIR M JUTGE NICOLAS";"";"19,99"
-"27/07/2026";"27/07/2026";"VIR M JUTGE NICOLAS";"";"9,21"
-"26/07/2026";"26/07/2026";"VIR de LIVRET CMB";"";"100,00"
-"25/07/2026";"25/07/2026";"CARTE 24/07 SAS NICAR RENNES";"2,99";""
-"25/07/2026";"25/07/2026";"VIR vers JUTGE NELLY";"150,00";""
-"25/07/2026";"25/07/2026";"CARTE 24/07 TABAC COURROUZE RENNES";"26,00";""
-"25/07/2026";"25/07/2026";"VIR de COMPTE CHEQUES 1";"";"150,00"
-"24/07/2026";"24/07/2026";"VIR de LIVRET CMB";"";"100,00"
-"24/07/2026";"24/07/2026";"CARTE 23/07 HELOU RENNES";"26,00";""
-"24/07/2026";"24/07/2026";"VIR vers LIVRET CMB";"204,00";""
-"24/07/2026";"24/07/2026";"VIR DGFIP FINANCES PUBLIQUES";"";"204,00"
-"23/07/2026";"23/07/2026";"CARTE 22/07 TABAC COURROUZE RENNES";"26,00";""
-"23/07/2026";"23/07/2026";"CARTE 22/07 SAS NICAR RENNES";"63,02";""
-"23/07/2026";"23/07/2026";"vers JUTGE NELLY";"150,00";""
-"21/07/2026";"21/07/2026";"CARTE 20/07 HELOU RENNES";"26,00";""
-"21/07/2026";"21/07/2026";"CARTE 18/07 DECATHLON 0122 CHANTEPIE";"23,99";""
-"21/07/2026";"21/07/2026";"VIR de LIVRET CMB";"";"100,00"
-"20/07/2026";"20/07/2026";"CARTE 19/07 STATION U 35 ST JACQUES";"61,62";""
-"20/07/2026";"19/07/2026";"CARTE 18/07 PELTIER NOYAL SUR VIL";"13,42";""
-"20/07/2026";"20/07/2026";"VIR vers LIVRET CMB";"1616,97";""
-"20/07/2026";"19/07/2026";"CARTE 18/07 MANIERE PRIMEUR BREAL SOUS MO";"5,33";""
-"20/07/2026";"20/07/2026";"CARTE 19/07 RELAY RENNES";"26,00";""
-"20/07/2026";"20/07/2026";"VIR INST NICOLAS JUTGE";"";"1616,97"
-"20/07/2026";"20/07/2026";"vers ALVAREZ MARIE";"60,00";""
-"19/07/2026";"19/07/2026";"VIR de COMPTE CHEQUES 1";"";"214,80"
-"18/07/2026";"18/07/2026";"CARTE 17/07 HELOU RENNES";"26,00";""
-"17/07/2026";"17/07/2026";"CARTE 16/07 TABAC COURROUZE RENNES";"26,00";""
-"16/07/2026";"16/07/2026";"CARTE 15/07 SAS NICAR RENNES";"54,55";""
-"16/07/2026";"16/07/2026";"CARTE 15/07 SAS NICAR RENNES";"8,06";""
-"16/07/2026";"16/07/2026";"PRLV DGFIP FINANCES PUBLIQUES";"175,00";""
-"15/07/2026";"15/07/2026";"VIR INST NICOLAS JUTGE";"";"165,00"
-"14/07/2026";"14/07/2026";"CARTE 13/07 CASTEL AUTO    0 NOYAL CHATILL";"186,66";""
-"14/07/2026";"14/07/2026";"CARTE 13/07 C3501 RENNES";"73,95";""
-"13/07/2026";"13/07/2026";"VIR INST vers JUTGE SIMON";"50,00";""
-"13/07/2026";"12/07/2026";"CARTE 11/07 MANIERE PRIMEUR BREAL SOUS MO";"10,85";""
-"13/07/2026";"12/07/2026";"CARTE 11/07 PELTIER NOYAL SUR VIL";"9,88";""
-"13/07/2026";"13/07/2026";"VIR INST vers JUTGE SIMON";"80,00";""
-"13/07/2026";"14/07/2026";"REM 1 CHQ BORNE RENNES STA";"";"50,00"
-"13/07/2026";"13/07/2026";"VRST 21245324 NICOLAS JUTGE";"";"70,00"
-"13/07/2026";"13/07/2026";"VIR INST NICOLAS JUTGE";"";"200,00"
-"13/07/2026";"13/07/2026";"VIR INST vers JUTGE SARAH";"70,00";""
-"13/07/2026";"13/07/2026";"VRST 21245325 NICOLAS JUTGE";"";"80,00"
-"11/07/2026";"11/07/2026";"VIR de LIVRET CMB";"";"200,00"
-"10/07/2026";"07/07/2026";"F COTISATION EUROCOMPTE 07/26";"4,79";""
-"10/07/2026";"10/07/2026";"PRLV LYCEE BREQUIGNY GENERAL ET";"13,50";""
-"09/07/2026";"09/07/2026";"CARTE 08/07 SAS NICAR RENNES";"1,91";""
-"09/07/2026";"09/07/2026";"CARTE 08/07 SAS NICAR RENNES";"58,11";""
-"09/07/2026";"09/07/2026";"CHQ 8431828";"178,00";""
-`;
-
   // ---------- Modal transaction ----------
   // Le sélecteur Compte du modal détermine où le mouvement est enregistré : state.transactions
   // (Courant, valeur "") ou compte.transactions d'un compte d'épargne (valeur = id du compte).
@@ -2336,9 +2205,9 @@
     setTimeout(demarrer, 12000); // filet de secours : l'appli s'ouvre de toute façon après 12s max
     chargerIdentifiantsCloud(); // indépendant, ne doit jamais retarder l'ouverture de l'appli
     chargerDonnees().then(function(){
-      var nbRetirees = purgerOccurrencesHorsAnnee();
+      var nbSupprimees = dedupliquerRecurrences();
       var nbAjoutees = synchroniserRecurrences();
-      if(nbRetirees>0 || nbAjoutees>0) sauvegarder();
+      if(nbSupprimees>0 || nbAjoutees>0) sauvegarder();
       demarrer();
     }).catch(function(e){
       console.error('Erreur au chargement', e);
