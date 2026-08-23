@@ -694,9 +694,13 @@
   // - hebdomadaire/mensuel/trimestriel/semestriel : jusqu'à décembre inclus de l'année civile de la
   //   date saisie (même jour du mois pour les fréquences mensuelles, ramené au dernier jour si le
   //   mois est plus court). C'est le mécanisme mensuel déjà validé, généralisé à un pas variable.
-  // - annuel : un cycle annuel ne repasse par définition jamais avant le 31/12 de l'année en cours,
-  //   donc le plafond « fin d'année civile » n'a pas de sens ici ; on projette la seule prochaine
-  //   échéance, un an jour pour jour après la saisie.
+  // - annuel : CORRIGÉ — borné à l'année civile EN COURS comme les autres fréquences, au lieu de
+  //   systématiquement projeter date+1 an. L'ancien comportement générait, dès la saisie d'une charge
+  //   annuelle en 2026, une occurrence datée 2027 (visible immédiatement dans Mouvements et dans les
+  //   totaux « Tout » du Dashboard, alors qu'on n'était même pas encore en 2027). Si la date de base
+  //   est ancienne (conversion d'un mouvement passé en récurrent), on rattrape toutes les échéances
+  //   annuelles dues jusqu'à l'année en cours incluse — même logique de rattrapage que
+  //   synchroniserRecurrences, ici appliquée dès la création/conversion plutôt qu'au démarrage suivant.
   // Ces occurrences futures s'intègrent naturellement à Répartition/Optimisation (période « Cette
   // année » ou « Tout ») mais n'impactent pas le solde tant que leur date n'est pas atteinte.
   function fabriquerOccurrence(base, dateOccurrence){
@@ -721,8 +725,12 @@
     }
 
     if(frequence === 'annuel'){
-      var dSuivante = new Date(d0.getFullYear()+1, d0.getMonth(), d0.getDate());
-      occurrences.push(fabriquerOccurrence(base, dateLocaleISO(dSuivante)));
+      var anneeActuelleAnnuel = new Date().getFullYear();
+      var curseurAnnuel = new Date(d0.getFullYear(), d0.getMonth(), d0.getDate());
+      while(curseurAnnuel.getFullYear() < anneeActuelleAnnuel){
+        curseurAnnuel = new Date(curseurAnnuel.getFullYear()+1, curseurAnnuel.getMonth(), curseurAnnuel.getDate());
+        occurrences.push(fabriquerOccurrence(base, dateLocaleISO(curseurAnnuel)));
+      }
       return occurrences;
     }
 
@@ -801,6 +809,25 @@
     });
     if(ajouts.length>0) state.transactions = state.transactions.concat(ajouts);
     return ajouts.length;
+  }
+
+  // ---------- Correctif : occurrences générées trop tôt ----------
+  // Avant correction, une charge/recette « annuelle » projetait systématiquement une occurrence à
+  // date+1 an dès sa création ou sa conversion (voir genererOccurrencesRecurrentes), ce qui a pu
+  // laisser des mouvements datés au-delà de l'année en cours (ex. 2027 alors qu'on est en 2026) dans
+  // des données déjà enregistrées. Cette fonction, appelée une fois à chaque démarrage, retire toute
+  // occurrence dérivée (recurrent, id différent de recurrenceId) dont l'année dépasse l'année civile
+  // en cours — elle sera régénérée au bon moment par synchroniserRecurrences le moment venu. Ne touche
+  // jamais le mouvement de base d'une série (id === recurrenceId), ni un mouvement non récurrent.
+  // Idempotent : une fois les données assainies, ne retrouve plus rien à retirer.
+  function purgerOccurrencesHorsAnnee(){
+    var anneeActuelle = new Date().getFullYear();
+    var avant = state.transactions.length;
+    state.transactions = state.transactions.filter(function(t){
+      var estOccurrenceDerivee = !!t.recurrenceId && t.id !== t.recurrenceId;
+      return !(estOccurrenceDerivee && anneeDe(t) > anneeActuelle);
+    });
+    return avant - state.transactions.length;
   }
 
   // ---------- Archivage annuel ----------
@@ -2309,8 +2336,9 @@
     setTimeout(demarrer, 12000); // filet de secours : l'appli s'ouvre de toute façon après 12s max
     chargerIdentifiantsCloud(); // indépendant, ne doit jamais retarder l'ouverture de l'appli
     chargerDonnees().then(function(){
+      var nbRetirees = purgerOccurrencesHorsAnnee();
       var nbAjoutees = synchroniserRecurrences();
-      if(nbAjoutees>0) sauvegarder();
+      if(nbRetirees>0 || nbAjoutees>0) sauvegarder();
       demarrer();
     }).catch(function(e){
       console.error('Erreur au chargement', e);
