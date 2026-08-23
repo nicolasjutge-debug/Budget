@@ -323,7 +323,11 @@
     </div>
     <form id="form-transaction" class="form-transaction">
       <input type="hidden" id="input-id-transaction">
+      <input type="hidden" id="input-compte-source">
       <input type="hidden" id="champ-type-actif" value="sortie">
+      <label class="etiquette-champ">Compte
+        <select id="input-compte-cible" class="input-select"></select>
+      </label>
       <div class="segment-type">
         <button type="button" data-type="sortie" class="actif">Sortie</button>
         <button type="button" data-type="entree">Entrée</button>
@@ -331,7 +335,7 @@
       <label class="etiquette-champ">Montant
         <input type="text" inputmode="decimal" id="input-montant" placeholder="0,00" required class="input-montant-champ">
       </label>
-      <label class="etiquette-champ">Catégorie
+      <label class="etiquette-champ" id="ligne-champ-categorie">Catégorie
         <select id="input-categorie" class="input-select"></select>
       </label>
       <label class="etiquette-champ">Description (facultatif)
@@ -396,6 +400,7 @@
     periode: 'mois',
     filtreCategorie: 'toutes',
     filtreRecurrence: 'toutes', // 'toutes' | 'ponctuels' | 'recurrents' — isole les mouvements courants noyés parmi les échéances récurrentes générées
+    compteAffiche: '', // '' = Courant, sinon id d'un compte d'épargne — quel grand livre Mouvements affiche
     objectifsAutoSync: false, // true = objectifs des postes de dépenses recalculés en direct sur les dépenses réelles (voir objectifEffectif)
     archives: [], // années civiles archivées : [{annee, transactions:[...], soldeNet, dateArchivage}]
     // Comptes d'épargne : chacun fonctionne comme un mini grand livre autonome, alimenté par son
@@ -414,6 +419,13 @@
   // ---------- Utilitaires ----------
   function genId(){ return 'id-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2,8); }
   function escapeHtml(str){ var div = document.createElement('div'); div.textContent = str==null?'':String(str); return div.innerHTML; }
+  // Tri alphabétique (locale FR, insensible accents/casse) sans muter la liste d'origine — utilisé
+  // partout où des catégories sont listées pour sélection/gestion (dropdown du modal, Postes de
+  // dépenses, Sources de revenus, filtre de Mouvements). Ne s'applique volontairement PAS à
+  // repartitionParCategorie/planOptimisation, qui ont leur propre tri par pertinence (montant/écart).
+  function triAlpha(liste){
+    return liste.slice().sort(function(a,b){ return a.nom.localeCompare(b.nom, 'fr', {sensitivity:'base'}); });
+  }
   function parseMontant(str){ if(!str) return NaN; var nettoye = String(str).trim().replace(/\s/g,'').replace(',', '.'); return parseFloat(nettoye); }
 
   var formateurMontant = new Intl.NumberFormat('fr-FR', {style:'currency', currency:'EUR', minimumFractionDigits:2, maximumFractionDigits:2});
@@ -727,6 +739,70 @@
     return occurrences;
   }
 
+  // ---------- Rattrapage des séries récurrentes ----------
+  // genererOccurrencesRecurrentes ne génère les occurrences que jusqu'à décembre de l'ANNÉE DE LA
+  // TRANSACTION DE BASE (voir plus haut) : une charge mensuelle créée en 2025 n'a donc jamais eu
+  // ses échéances 2026 générées si l'app n'a pas été rouverte entretemps pour les régénérer — ces
+  // sorties manquantes ne sont jamais déduites du solde, qui apparaît alors trop élevé. Cette
+  // fonction, appelée à chaque démarrage, détecte les séries dont la dernière occurrence connue est
+  // antérieure à l'année en cours et complète le manquant jusqu'à décembre de l'année en cours
+  // inclus, en respectant le pas de la fréquence (peut rattraper plusieurs années d'un coup si
+  // l'app est restée fermée longtemps). Idempotent : une série déjà à jour n'est jamais retouchée,
+  // donc un appel à chaque démarrage ne duplique rien.
+  function synchroniserRecurrences(){
+    var anneeActuelle = new Date().getFullYear();
+    var series = {};
+    state.transactions.forEach(function(t){
+      if(!t.recurrenceId) return;
+      (series[t.recurrenceId] = series[t.recurrenceId] || []).push(t);
+    });
+    var ajouts = [];
+    Object.keys(series).forEach(function(rid){
+      var occs = series[rid];
+      var derniere = occs.reduce(function(a,b){ return a.date > b.date ? a : b; });
+      if(anneeDe(derniere) >= anneeActuelle) return; // déjà à jour
+      var freq = derniere.recurrenceFrequence;
+      var base = {
+        type: derniere.type, montant: derniere.montant, categorie: derniere.categorie,
+        description: derniere.description, recurrenceId: rid, recurrenceFrequence: freq
+      };
+      if(freq === 'hebdomadaire'){
+        var curseurH = new Date(derniere.date+'T00:00:00');
+        curseurH = new Date(curseurH.getFullYear(), curseurH.getMonth(), curseurH.getDate()+7);
+        while(curseurH.getFullYear() <= anneeActuelle){
+          ajouts.push(fabriquerOccurrence(base, dateLocaleISO(curseurH)));
+          curseurH = new Date(curseurH.getFullYear(), curseurH.getMonth(), curseurH.getDate()+7);
+        }
+        return;
+      }
+      if(freq === 'annuel'){
+        var curseurA = new Date(derniere.date+'T00:00:00');
+        while(curseurA.getFullYear() < anneeActuelle){
+          curseurA = new Date(curseurA.getFullYear()+1, curseurA.getMonth(), curseurA.getDate());
+          ajouts.push(fabriquerOccurrence(base, dateLocaleISO(curseurA)));
+        }
+        return;
+      }
+      // mensuel (pas=1) / trimestriel (pas=3) / semestriel (pas=6) : reprend le cycle exactement là
+      // où la dernière occurrence connue s'est arrêtée, jusqu'à décembre de l'année en cours inclus.
+      var pas = freq==='trimestriel' ? 3 : (freq==='semestriel' ? 6 : 1);
+      var dRef = new Date(derniere.date+'T00:00:00');
+      var jourCible = dRef.getDate();
+      var curseurAnnee = dRef.getFullYear();
+      var curseurMois = dRef.getMonth() + pas;
+      while(curseurAnnee < anneeActuelle || (curseurAnnee===anneeActuelle && curseurMois<=11)){
+        if(curseurMois > 11){ curseurMois -= 12; curseurAnnee += 1; continue; }
+        var dernierJourMois = new Date(curseurAnnee, curseurMois+1, 0).getDate();
+        var jour = Math.min(jourCible, dernierJourMois);
+        var dateOcc = curseurAnnee + '-' + String(curseurMois+1).padStart(2,'0') + '-' + String(jour).padStart(2,'0');
+        ajouts.push(fabriquerOccurrence(base, dateOcc));
+        curseurMois += pas;
+      }
+    });
+    if(ajouts.length>0) state.transactions = state.transactions.concat(ajouts);
+    return ajouts.length;
+  }
+
   // ---------- Archivage annuel ----------
   function anneeDe(t){ return parseInt(t.date.slice(0,4), 10); }
   function anneesDisponiblesPourArchivage(){
@@ -833,28 +909,6 @@
       btn.addEventListener('click', function(){ ouvrirModal(btn.dataset.id); });
     });
   }
-  // Rendu dédié aux mouvements d'un compte d'épargne (ajout manuel ou import CSV) : volontairement
-  // séparé de renderListeMouvements pour ne rien risquer sur le grand livre principal. Pas de
-  // catégorie ni de clic pour éditer (ces mouvements n'existent que dans compte.transactions, pas
-  // dans state.transactions) — juste le mouvement et un bouton de suppression par ligne.
-  function renderListeMouvementsCompte(compteId, txs){
-    if(txs.length===0){
-      return '<div class="etat-vide"><p>Ce compte est vierge.</p><p class="etat-vide-sous">Ajoutez un mouvement ou importez un relevé pour commencer.</p></div>';
-    }
-    return '<div class="liste-mvts">' + txs.map(function(t){
-      var signe = t.type==='entree' ? '+' : '-';
-      var classe = t.type==='entree' ? 'ink-credit' : 'ink-debit';
-      return '<div class="ligne-mvt ligne-mvt--compte">' +
-        '<span class="ligne-mvt-tick" style="background:'+(t.type==='entree'?'#2E7D53':'#B3452F')+'"></span>' +
-        '<span class="ligne-mvt-corps">' +
-          '<span class="ligne-mvt-titre">'+escapeHtml(t.description || (t.type==='entree'?'Entrée':'Sortie'))+'</span>' +
-          '<span class="ligne-mvt-sous">'+formatDateAffichage(t.date)+'</span>' +
-        '</span>' +
-        '<span class="ligne-mvt-montant '+classe+'">'+signe+formatMontant(t.montant)+'</span>' +
-        '<button type="button" class="bouton-supprimer-cat" data-action="suppr-mvt-compte" data-compte="'+compteId+'" data-mvt="'+t.id+'" title="Supprimer ce mouvement">✕</button>' +
-      '</div>';
-    }).join('') + '</div>';
-  }
 
   // ---------- Rendu : Échéances à venir (Item dédié, distinct du solde) ----------
   function renderBlocEcheances(echeances){
@@ -887,7 +941,12 @@
     var t = totauxPeriode();
     var el = document.getElementById('vue-dashboard');
     var soldePositif = solde >= 0;
-    var recents = state.transactions.slice().sort(trierParDateDesc).slice(0,5);
+    // Les échéances futures déjà générées (ex. la prochaine occurrence d'une série annuelle) n'ont
+    // pas leur place dans une liste de mouvements RÉCENTS — elles ont leur propre section « Échéances
+    // à venir » juste au-dessus. Sans ce filtre, une occurrence lointaine remontait en tête (tri par
+    // date décroissante) et masquait l'activité réellement récente.
+    var aujourdhuiRecents = dateLocaleISO();
+    var recents = state.transactions.filter(function(t){ return t.date <= aujourdhuiRecents; }).sort(trierParDateDesc).slice(0,5);
     var echeances = echeancesAVenir();
     el.innerHTML =
       '<div class="hero-solde">' +
@@ -914,15 +973,46 @@
   // ---------- Rendu : Mouvements ----------
   function renderMouvements(){
     var el = document.getElementById('vue-mouvements');
+    var compteAffiche = state.compteAffiche || '';
+    if(compteAffiche && !getCompte(compteAffiche)) compteAffiche = state.compteAffiche = ''; // compte supprimé entretemps
+    var selectCompteHtml = '<select id="select-compte-mouvements" class="select-filtre">' +
+      '<option value="">Courant</option>' +
+      triAlpha(state.comptes).map(function(c){ return '<option value="'+c.id+'" '+(c.id===compteAffiche?'selected':'')+'>'+escapeHtml(c.nom)+'</option>'; }).join('') +
+    '</select>';
+
+    if(compteAffiche){
+      var compte = getCompte(compteAffiche);
+      var txsCompte = (compte.transactions||[]).slice().sort(trierParDateDesc);
+      el.innerHTML =
+        '<h2 class="section-titre">Mouvements</h2>' +
+        '<div class="filtres-mouvements">' + selectCompteHtml + '</div>' +
+        '<p class="aide-texte">Solde actuel : '+formatMontant(soldeCompte(compte))+'</p>' +
+        renderListeMouvements(txsCompte, false, 'Ce compte est vierge.', 'Ajoutez un mouvement ou importez un relevé pour commencer.');
+      document.getElementById('select-compte-mouvements').addEventListener('change', function(e){
+        state.compteAffiche = e.target.value;
+        renderMouvements();
+      });
+      attacherClicsLignes(el);
+      return;
+    }
+
     var filtreCat = state.filtreCategorie || 'toutes';
     var filtreRec = state.filtreRecurrence || 'toutes';
     var txs = state.transactions.slice().sort(trierParDateDesc);
     if(filtreCat !== 'toutes'){ txs = txs.filter(function(t){ return t.categorie===filtreCat; }); }
     if(filtreRec === 'ponctuels'){ txs = txs.filter(function(t){ return !t.recurrent; }); }
-    else if(filtreRec === 'recurrents'){ txs = txs.filter(function(t){ return !!t.recurrent; }); }
-    var toutesCats = state.categoriesSortie.concat(state.categoriesEntree).concat(
+    else if(filtreRec === 'recurrents'){
+      // Le rattrapage des récurrences (synchroniserRecurrences) peut désormais régénérer plusieurs
+      // mois, voire plusieurs années, d'un coup pour une série longtemps restée sans ouverture de
+      // l'appli — sans ce filtre, « Récurrents » deviendrait une liste énorme couvrant toute l'année
+      // (voire plusieurs). On la restreint donc au mois en cours, la portée la plus utile pour
+      // vérifier « quelles charges récurrentes tombent ce mois-ci ».
+      var moisCourant = dateLocaleISO().slice(0,7);
+      txs = txs.filter(function(t){ return !!t.recurrent && t.date.slice(0,7)===moisCourant; });
+    }
+    var toutesCats = triAlpha(state.categoriesSortie.concat(state.categoriesEntree).concat(
       state.comptes.map(function(c){ return {id:c.id, nom:'Virement vers '+c.nom}; })
-    );
+    ));
     var filtreActif = (filtreCat !== 'toutes') || (filtreRec !== 'toutes');
     var resumeHtml = '';
     if(txs.length>0){
@@ -933,6 +1023,7 @@
     el.innerHTML =
       '<h2 class="section-titre">Mouvements</h2>' +
       '<div class="filtres-mouvements">' +
+        selectCompteHtml +
         '<select id="select-filtre-cat" class="select-filtre">' +
           '<option value="toutes">Toutes les catégories</option>' +
           toutesCats.map(function(c){ return '<option value="'+c.id+'" '+(c.id===filtreCat?'selected':'')+'>'+escapeHtml(c.nom)+'</option>'; }).join('') +
@@ -945,6 +1036,10 @@
       '</div>' +
       resumeHtml +
       renderListeMouvements(txs, false, filtreActif ? 'Aucun mouvement ne correspond à ce filtre.' : undefined, filtreActif ? '' : undefined);
+    document.getElementById('select-compte-mouvements').addEventListener('change', function(e){
+      state.compteAffiche = e.target.value;
+      renderMouvements();
+    });
     document.getElementById('select-filtre-cat').addEventListener('change', function(e){
       state.filtreCategorie = e.target.value;
       renderMouvements();
@@ -1195,21 +1290,8 @@
                 '<input type="text" class="input-texte" data-champ-compte="nom" data-id="'+c.id+'" value="'+escapeHtml(c.nom)+'"></label>' +
               '<label class="etiquette-champ" style="margin-top:8px">Solde initial (avant le premier mouvement)' +
                 '<input type="text" inputmode="decimal" class="input-montant-champ" data-champ-compte="soldeInitial" data-id="'+c.id+'" value="'+String(c.soldeInitial||0).replace('.',',')+'" style="width:140px"></label>' +
-              '<div class="form-mvt-compte" style="margin-top:14px">' +
-                '<p class="etiquette-champ" style="margin-bottom:6px">Ajouter un mouvement</p>' +
-                '<div style="display:flex;gap:8px;margin-bottom:8px">' +
-                  '<select class="input-select" style="flex:0 0 110px" data-champ-mvt="type" data-id="'+c.id+'">' +
-                    '<option value="sortie">Sortie</option>' +
-                    '<option value="entree">Entrée</option>' +
-                  '</select>' +
-                  '<input type="text" inputmode="decimal" class="input-montant-champ" placeholder="Montant" style="flex:1" data-champ-mvt="montant" data-id="'+c.id+'">' +
-                '</div>' +
-                '<input type="text" class="input-texte" placeholder="Description (optionnel)" style="width:100%;margin-bottom:8px" data-champ-mvt="description" data-id="'+c.id+'">' +
-                '<input type="date" class="input-texte" style="width:100%;margin-bottom:8px" value="'+dateLocaleISO()+'" data-champ-mvt="date" data-id="'+c.id+'">' +
-                '<button class="bouton-secondaire" type="button" data-action="ajouter-mvt-compte" data-id="'+c.id+'">+ Ajouter ce mouvement</button>' +
-              '</div>' +
-              '<div style="margin-top:14px">' + renderListeMouvementsCompte(c.id, (c.transactions||[]).slice().sort(trierParDateDesc)) + '</div>' +
-              '<button class="bouton-secondaire" type="button" data-action="import-compte" data-id="'+c.id+'" style="margin-top:10px">Importer un relevé (CSV)</button>' +
+              '<p class="aide-texte" style="margin-top:10px">'+(c.transactions||[]).length+' mouvement'+((c.transactions||[]).length>1?'s':'')+' — pour ajouter, modifier ou supprimer un mouvement, sélectionnez ce compte depuis Mouvements.</p>' +
+              '<button class="bouton-secondaire" type="button" data-action="import-compte" data-id="'+c.id+'" style="margin-top:6px">Importer un relevé (CSV)</button>' +
               '<input type="file" class="input-import-compte-csv" data-id="'+c.id+'" accept=".csv,text/csv" style="display:none">' +
               '<button class="bouton-danger" type="button" data-action="supprimer-compte" data-id="'+c.id+'" style="margin-top:8px">Supprimer ce compte</button>' +
             '</div>'
@@ -1248,11 +1330,11 @@
           ('Somme des objectifs : '+sommeObjectifs+'%'+(sommeObjectifs!==100?' (idéalement ≈ 100%)':''))
         )+'</p>' +
         (!modeAuto && sommeObjectifs!==100 ? '<button class="bouton-secondaire" type="button" id="btn-reequilibrer-objectifs" style="margin-bottom:10px">Rééquilibrer à 100%</button>' : '') +
-        '<div class="liste-categories" id="liste-cat-sortie">' + state.categoriesSortie.map(function(c){return renderLigneCategorie(c,'sortie');}).join('') + '</div>' +
+        '<div class="liste-categories" id="liste-cat-sortie">' + triAlpha(state.categoriesSortie).map(function(c){return renderLigneCategorie(c,'sortie');}).join('') + '</div>' +
         '<button class="bouton-secondaire" type="button" id="btn-ajouter-cat-sortie">+ Ajouter un poste de dépense</button>' +
       '</div>' +
       '<div class="bloc-reglage"><h3 class="sous-titre">Sources de revenus</h3>' +
-        '<div class="liste-categories" id="liste-cat-entree">' + state.categoriesEntree.map(function(c){return renderLigneCategorie(c,'entree');}).join('') + '</div>' +
+        '<div class="liste-categories" id="liste-cat-entree">' + triAlpha(state.categoriesEntree).map(function(c){return renderLigneCategorie(c,'entree');}).join('') + '</div>' +
         '<button class="bouton-secondaire" type="button" id="btn-ajouter-cat-entree">+ Ajouter une source</button>' +
       '</div>' +
       '<div class="bloc-reglage"><h3 class="sous-titre">Données</h3>' +
@@ -1398,12 +1480,6 @@
     document.getElementById('btn-nouveau-compte-epargne').addEventListener('click', function(){ document.getElementById('input-nouveau-compte-csv').click(); });
     document.getElementById('input-nouveau-compte-csv').addEventListener('change', importerNouveauCompteCSV);
     document.getElementById('btn-nouveau-compte-manuel').addEventListener('click', creerCompteManuel);
-    el.querySelectorAll('[data-action="ajouter-mvt-compte"]').forEach(function(btn){
-      btn.addEventListener('click', function(){ ajouterMouvementCompte(btn.dataset.id); });
-    });
-    el.querySelectorAll('[data-action="suppr-mvt-compte"]').forEach(function(btn){
-      btn.addEventListener('click', function(){ supprimerMouvementCompte(btn.dataset.compte, btn.dataset.mvt); });
-    });
   }
 
   // ---------- Export / Import / Reset ----------
@@ -1827,38 +1903,6 @@
     render();
     toast('Compte « '+compte.nom+' » créé');
   }
-  function ajouterMouvementCompte(compteId){
-    var compte = getCompte(compteId);
-    if(!compte) return;
-    var elType = document.querySelector('.form-mvt-compte [data-champ-mvt="type"][data-id="'+compteId+'"]');
-    var elMontant = document.querySelector('.form-mvt-compte [data-champ-mvt="montant"][data-id="'+compteId+'"]');
-    var elDescr = document.querySelector('.form-mvt-compte [data-champ-mvt="description"][data-id="'+compteId+'"]');
-    var elDate = document.querySelector('.form-mvt-compte [data-champ-mvt="date"][data-id="'+compteId+'"]');
-    var montant = parseMontant(elMontant.value);
-    if(!montant || isNaN(montant) || montant<=0){ toast('Indiquez un montant valide'); return; }
-    var mouvement = {
-      id: genId(),
-      type: elType.value==='entree' ? 'entree' : 'sortie',
-      montant: montant,
-      description: elDescr.value.trim(),
-      date: elDate.value || dateLocaleISO()
-    };
-    compte.transactions = (compte.transactions||[]).concat([mouvement]);
-    sauvegarder();
-    renderReglages();
-    render();
-    toast('Mouvement ajouté à « '+compte.nom+' »');
-  }
-  function supprimerMouvementCompte(compteId, mvtId){
-    var compte = getCompte(compteId);
-    if(!compte) return;
-    if(!confirm('Supprimer ce mouvement ?')) return;
-    compte.transactions = (compte.transactions||[]).filter(function(t){ return t.id!==mvtId; });
-    sauvegarder();
-    renderReglages();
-    render();
-    toast('Mouvement supprimé');
-  }
   function supprimerCompte(id){
     var compte = getCompte(id);
     if(!compte) return;
@@ -2008,16 +2052,43 @@
 `;
 
   // ---------- Modal transaction ----------
+  // Le sélecteur Compte du modal détermine où le mouvement est enregistré : state.transactions
+  // (Courant, valeur "") ou compte.transactions d'un compte d'épargne (valeur = id du compte).
+  function remplirComptesCible(){
+    var select = document.getElementById('input-compte-cible');
+    select.innerHTML = '<option value="">Courant</option>' +
+      triAlpha(state.comptes).map(function(c){ return '<option value="'+c.id+'">'+escapeHtml(c.nom)+'</option>'; }).join('');
+  }
+  // Cherche une transaction par id d'abord dans le grand livre principal, puis dans chaque compte
+  // d'épargne — retourne aussi l'id du compte source ("" pour le grand livre) pour savoir où
+  // enregistrer/supprimer ensuite.
+  function trouverTransactionEtSource(id){
+    if(!id) return null;
+    var t = state.transactions.find(function(x){return x.id===id;});
+    if(t) return {transaction:t, compteId:''};
+    for(var i=0;i<state.comptes.length;i++){
+      var trouve = (state.comptes[i].transactions||[]).find(function(x){return x.id===id;});
+      if(trouve) return {transaction:trouve, compteId:state.comptes[i].id};
+    }
+    return null;
+  }
+  // Un mouvement de compte d'épargne n'a ni catégorie ni récurrence (concepts propres au budget du
+  // grand livre) : on masque ces champs quand un compte d'épargne est ciblé.
+  function appliquerVisibiliteCompteCible(compteCibleId, transactionEditee){
+    var estCompte = !!compteCibleId;
+    document.getElementById('ligne-champ-categorie').style.display = estCompte ? 'none' : 'flex';
+    document.getElementById('ligne-champ-recurrent').style.display = (estCompte || (transactionEditee && transactionEditee.recurrenceId)) ? 'none' : 'flex';
+  }
   function remplirCategories(type){
     var select = document.getElementById('input-categorie');
-    var cats = type==='sortie' ? state.categoriesSortie : state.categoriesEntree;
+    var cats = triAlpha(type==='sortie' ? state.categoriesSortie : state.categoriesEntree);
     var html = cats.map(function(c){ return '<option value="'+c.id+'">'+escapeHtml(c.nom)+'</option>'; }).join('');
     // Chaque compte d'épargne devient un item sélectionnable pour catégoriser une sortie comme
     // virement vers ce compte précis (au lieu du générique « Virements ») — voir getCategorie et
     // montantEpargnePeriode pour la résolution du libellé et la prise en compte comme épargne.
     if(type==='sortie' && state.comptes.length>0){
       html += '<optgroup label="Virement vers un compte d\'épargne">' +
-        state.comptes.map(function(c){ return '<option value="'+c.id+'">'+escapeHtml(c.nom)+'</option>'; }).join('') +
+        triAlpha(state.comptes).map(function(c){ return '<option value="'+c.id+'">'+escapeHtml(c.nom)+'</option>'; }).join('') +
       '</optgroup>';
     }
     select.innerHTML = html;
@@ -2031,12 +2102,17 @@
     document.getElementById('input-date').value = dateLocaleISO();
     document.getElementById('input-recurrence').value = 'aucune';
     document.querySelectorAll('.segment-type button').forEach(function(b){ b.classList.remove('actif'); });
+    remplirComptesCible();
+    var selectCompte = document.getElementById('input-compte-cible');
+    selectCompte.disabled = false;
 
-    var t = transactionId ? state.transactions.find(function(x){return x.id===transactionId;}) : null;
-    // Masqué seulement si le mouvement appartient déjà à une série récurrente (rien à reconvertir,
-    // et régénérer par-dessus créerait des doublons) ; affiché pour une création ET pour l'édition
-    // d'un mouvement pas encore récurrent, afin de pouvoir transformer un mouvement déjà saisi.
-    document.getElementById('ligne-champ-recurrent').style.display = (t && t.recurrenceId) ? 'none' : 'flex';
+    var trouve = trouverTransactionEtSource(transactionId);
+    var t = trouve ? trouve.transaction : null;
+    var compteCibleId = trouve ? trouve.compteId : '';
+    selectCompte.value = compteCibleId;
+    document.getElementById('input-compte-source').value = compteCibleId;
+    appliquerVisibiliteCompteCible(compteCibleId, t);
+
     var typeInitial = t ? t.type : 'sortie';
     var boutonType = document.querySelector('.segment-type button[data-type="'+typeInitial+'"]');
     if(boutonType) boutonType.classList.add('actif');
@@ -2047,10 +2123,13 @@
       document.getElementById('titre-modal').textContent = 'Modifier le mouvement';
       document.getElementById('input-id-transaction').value = t.id;
       document.getElementById('input-montant').value = String(t.montant).replace('.', ',');
-      document.getElementById('input-categorie').value = t.categorie;
+      if(!compteCibleId) document.getElementById('input-categorie').value = t.categorie;
       document.getElementById('input-description').value = t.description || '';
       document.getElementById('input-date').value = t.date;
       document.getElementById('btn-supprimer-transaction').style.display = 'block';
+      // On ne déplace pas un mouvement existant d'un compte à l'autre depuis ce sélecteur — il
+      // reste là où il a été créé ; le modifier reviendrait à le supprimer puis le recréer ailleurs.
+      selectCompte.disabled = true;
     } else {
       document.getElementById('titre-modal').textContent = 'Ajouter un mouvement';
     }
@@ -2077,6 +2156,9 @@
   document.getElementById('fab-ajouter').addEventListener('click', function(){ ouvrirModal(); });
   document.getElementById('btn-fermer-modal').addEventListener('click', fermerModal);
   document.getElementById('overlay-modal').addEventListener('click', fermerModal);
+  document.getElementById('input-compte-cible').addEventListener('change', function(){
+    appliquerVisibiliteCompteCible(this.value, null);
+  });
   document.querySelectorAll('.segment-type button').forEach(function(btn){
     btn.addEventListener('click', function(){
       document.querySelectorAll('.segment-type button').forEach(function(b){ b.classList.remove('actif'); });
@@ -2092,14 +2174,45 @@
     var type = document.getElementById('champ-type-actif').value;
     var montant = parseMontant(document.getElementById('input-montant').value);
     if(!(montant>0)){ toast('Montant invalide'); return; }
-    var categorie = document.getElementById('input-categorie').value;
     var description = document.getElementById('input-description').value.trim();
     var date = document.getElementById('input-date').value || dateLocaleISO();
+    var selectCompte = document.getElementById('input-compte-cible');
+    var compteCible = selectCompte.disabled ? document.getElementById('input-compte-source').value : selectCompte.value;
+
+    if(compteCible){
+      // --- Mouvement d'un compte d'épargne : ni catégorie ni récurrence, propres au grand livre ---
+      var compte = getCompte(compteCible);
+      if(!compte){ toast('Compte introuvable'); return; }
+      if(id){
+        var tCompte = (compte.transactions||[]).find(function(x){return x.id===id;});
+        if(tCompte){ tCompte.type=type; tCompte.montant=montant; tCompte.description=description; tCompte.date=date; }
+        toast('Mouvement modifié');
+      } else {
+        compte.transactions = (compte.transactions||[]).concat([{id:genId(), type:type, montant:montant, description:description, date:date}]);
+        toast('Mouvement ajouté à « '+compte.nom+' »');
+      }
+      fermerModal();
+      sauvegarder();
+      render();
+      return;
+    }
+
+    var categorie = document.getElementById('input-categorie').value;
 
     if(id){
       var t = state.transactions.find(function(x){return x.id===id;});
       if(t){
+        var categoriePrecedente = t.categorie;
         t.type=type; t.montant=montant; t.categorie=categorie; t.description=description; t.date=date;
+        // Une série récurrente représente une seule et même charge/recette dans le temps : si sa
+        // catégorie est corrigée sur une occurrence (ex. reclasser un abonnement mal catégorisé),
+        // toutes les autres occurrences de la série (passées et futures, même recurrenceId) doivent
+        // suivre — sinon la même charge se retrouve éclatée entre deux catégories dans Répartition.
+        if(t.recurrenceId && categorie!==categoriePrecedente){
+          state.transactions.forEach(function(autre){
+            if(autre.recurrenceId===t.recurrenceId && autre.id!==t.id) autre.categorie = categorie;
+          });
+        }
         // Conversion en récurrent : uniquement possible si le mouvement n'appartient pas déjà à
         // une série (champ masqué dans ce cas — voir ouvrirModal). Réutilise le même générateur
         // que pour une création : comme il part de la date du mouvement (pas d'aujourd'hui), les
@@ -2147,6 +2260,18 @@
   document.getElementById('btn-supprimer-transaction').addEventListener('click', function(){
     var id = document.getElementById('input-id-transaction').value;
     if(!id) return;
+    var compteSource = document.getElementById('input-compte-source').value;
+    if(compteSource){
+      var compte = getCompte(compteSource);
+      if(!compte) return;
+      if(!confirm('Supprimer ce mouvement ?')) return;
+      compte.transactions = (compte.transactions||[]).filter(function(x){return x.id!==id;});
+      fermerModal();
+      sauvegarder();
+      render();
+      toast('Mouvement supprimé');
+      return;
+    }
     var t = state.transactions.find(function(x){return x.id===id;});
     if(!t) return;
     if(!confirm('Supprimer ce mouvement ?')) return;
@@ -2183,7 +2308,11 @@
     }
     setTimeout(demarrer, 12000); // filet de secours : l'appli s'ouvre de toute façon après 12s max
     chargerIdentifiantsCloud(); // indépendant, ne doit jamais retarder l'ouverture de l'appli
-    chargerDonnees().then(demarrer).catch(function(e){
+    chargerDonnees().then(function(){
+      var nbAjoutees = synchroniserRecurrences();
+      if(nbAjoutees>0) sauvegarder();
+      demarrer();
+    }).catch(function(e){
       console.error('Erreur au chargement', e);
       demarrer();
     });
