@@ -451,12 +451,17 @@
   function getCategorie(id, type){
     var liste = type==='entree' ? state.categoriesEntree : state.categoriesSortie;
     for(var i=0;i<liste.length;i++){ if(liste[i].id===id) return liste[i]; }
-    // Une sortie catégorisée avec l'id d'un compte d'épargne est un virement vers ce compte
-    // (voir remplirCategories) : elle n'a pas d'entrée dans categoriesSortie, on résout ici.
-    if(type==='sortie'){
-      var compte = getCompte(id);
-      if(compte) return {nom:'Virement vers '+compte.nom, couleur:compte.couleur};
+    // Une sortie/entrée catégorisée avec l'id d'un compte d'épargne est un virement vers/depuis ce
+    // compte (voir remplirCategories) : elle n'a pas d'entrée dans categoriesSortie/categoriesEntree,
+    // on résout ici. Le sens (vers/depuis) suit simplement le type du mouvement côté Courant.
+    var compte = getCompte(id);
+    if(compte){
+      if(type==='sortie') return {nom:'Virement vers '+compte.nom, couleur:compte.couleur};
+      if(type==='entree') return {nom:'Virement depuis '+compte.nom, couleur:compte.couleur};
     }
+    // Un mouvement de compte d'épargne ajouté manuellement n'a pas de categorie du tout (id vide) —
+    // à distinguer d'une vraie catégorie supprimée (id non vide mais qui ne correspond plus à rien).
+    if(!id) return {nom: type==='entree' ? 'Entrée' : 'Sortie', couleur:'#8A7F6E'};
     return {nom:'Catégorie supprimée', couleur:'#8A7F6E'};
   }
   // ---------- Comptes d'épargne ----------
@@ -472,6 +477,59 @@
       if(t.date > aujourdhui) return acc;
       return acc + (t.type==='entree'? t.montant : -t.montant);
     }, compte.soldeInitial||0);
+  }
+  // ---------- Miroir des virements Courant <-> compte d'épargne ----------
+  // Une sortie catégorisée « Virement vers X » (ou une entrée « Virement depuis X ») ne se contente
+  // plus seulement d'étiqueter le mouvement côté Courant : elle crée aussi l'écriture opposée dans
+  // le compte d'épargne concerné, pour que son solde en tienne compte immédiatement. Les deux
+  // écritures sont liées par un miroirId commun afin qu'une suppression (ou une modification de
+  // montant/date) de l'une se répercute sur l'autre plutôt que de laisser une orpheline.
+  //
+  // Départ demandé pour un virement RÉCURRENT : le 1er septembre 2026, jamais avant — les
+  // occurrences antérieures (janvier à août) sont déjà couvertes par les imports CSV existants du
+  // compte, un miroir rétroactif les compterait deux fois. Un virement PONCTUEL, lui, est toujours
+  // reflété immédiatement (pas le même risque de double-comptage rétroactif).
+  var DATE_DEBUT_MIROIR_VIREMENTS_RECURRENTS = '2026-09-01';
+  // excludeId doit être l'id de la transaction APPELANTE, pour ne jamais la retrouver elle-même :
+  // sans lui, un appel depuis le côté compte matchait la transaction elle-même dans la première
+  // boucle (même miroirId qu'elle-même) avant d'avoir la moindre chance d'atteindre son vrai jumeau
+  // côté Courant.
+  function trouverMiroir(miroirId, excludeId){
+    if(!miroirId) return null;
+    for(var i=0;i<state.comptes.length;i++){
+      var t = (state.comptes[i].transactions||[]).find(function(x){ return x.miroirId===miroirId && x.id!==excludeId; });
+      if(t) return {source:'compte', compte:state.comptes[i], transaction:t};
+    }
+    var tCourant = state.transactions.find(function(x){ return x.miroirId===miroirId && x.id!==excludeId; });
+    if(tCourant) return {source:'courant', transaction:tCourant};
+    return null;
+  }
+  // transactionCourant doit avoir categorie = id d'un compte d'épargne. No-op silencieux sinon (ou
+  // si ce compte n'existe plus) — appelable sans vérification préalable par l'appelant.
+  function creerMiroirVirement(transactionCourant){
+    var compte = getCompte(transactionCourant.categorie);
+    if(!compte) return null;
+    var miroirId = transactionCourant.miroirId || genId();
+    transactionCourant.miroirId = miroirId;
+    var typeMiroir = transactionCourant.type==='sortie' ? 'entree' : 'sortie';
+    var libelleAuto = transactionCourant.type==='sortie' ? 'Virement depuis Courant' : 'Virement vers Courant';
+    var mvt = {
+      id: genId(), type: typeMiroir, montant: transactionCourant.montant, date: transactionCourant.date,
+      description: transactionCourant.description ? (libelleAuto+' — '+transactionCourant.description) : libelleAuto,
+      miroirId: miroirId
+    };
+    compte.transactions = (compte.transactions||[]).concat([mvt]);
+    return mvt;
+  }
+  function supprimerMiroirLie(transaction){
+    if(!transaction || !transaction.miroirId) return;
+    var trouve = trouverMiroir(transaction.miroirId, transaction.id);
+    if(!trouve) return;
+    if(trouve.source==='compte'){
+      trouve.compte.transactions = trouve.compte.transactions.filter(function(x){ return x.id!==trouve.transaction.id; });
+    } else {
+      state.transactions = state.transactions.filter(function(x){ return x.id!==trouve.transaction.id; });
+    }
   }
 
   // ---------- Stockage ----------
@@ -763,7 +821,9 @@
       var cle = rid+'|'+dateOcc;
       if(existantes[cle]) return;
       existantes[cle] = true;
-      ajouts.push(fabriquerOccurrence(base, dateOcc));
+      var occ = fabriquerOccurrence(base, dateOcc);
+      ajouts.push(occ);
+      if(dateOcc >= DATE_DEBUT_MIROIR_VIREMENTS_RECURRENTS) creerMiroirVirement(occ);
     }
     Object.keys(series).forEach(function(rid){
       var occs = series[rid];
@@ -1979,11 +2039,13 @@
     var select = document.getElementById('input-categorie');
     var cats = triAlpha(type==='sortie' ? state.categoriesSortie : state.categoriesEntree);
     var html = cats.map(function(c){ return '<option value="'+c.id+'">'+escapeHtml(c.nom)+'</option>'; }).join('');
-    // Chaque compte d'épargne devient un item sélectionnable pour catégoriser une sortie comme
-    // virement vers ce compte précis (au lieu du générique « Virements ») — voir getCategorie et
-    // montantEpargnePeriode pour la résolution du libellé et la prise en compte comme épargne.
-    if(type==='sortie' && state.comptes.length>0){
-      html += '<optgroup label="Virement vers un compte d\'épargne">' +
+    // Chaque compte d'épargne devient un item sélectionnable pour catégoriser un mouvement comme
+    // virement vers (sortie) ou depuis (entrée) ce compte précis — voir getCategorie pour la
+    // résolution du libellé, montantEpargnePeriode pour la prise en compte comme épargne côté
+    // sortie, et creerMiroirVirement pour l'écriture miroir créée automatiquement sur le compte.
+    if(state.comptes.length>0){
+      var libelleGroupe = type==='sortie' ? 'Virement vers un compte d\'épargne' : 'Virement depuis un compte d\'épargne';
+      html += '<optgroup label="'+libelleGroupe+'">' +
         triAlpha(state.comptes).map(function(c){ return '<option value="'+c.id+'">'+escapeHtml(c.nom)+'</option>'; }).join('') +
       '</optgroup>';
     }
@@ -2109,6 +2171,25 @@
             if(autre.recurrenceId===t.recurrenceId && autre.id!==t.id) autre.categorie = categorie;
           });
         }
+        // Répercute sur l'écriture miroir existante (montant/date/sens), la recrée si le virement
+        // change de compte, la retire si ce n'est plus un virement, ou en crée une si la catégorie
+        // vient tout juste de devenir un virement de compte (édition manuelle : pas de restriction
+        // de date ici, contrairement à la génération automatique d'une série récurrente).
+        var compteVirementApres = getCompte(categorie);
+        if(t.miroirId){
+          var lienMiroir = trouverMiroir(t.miroirId, t.id);
+          if(lienMiroir && lienMiroir.source==='compte' && compteVirementApres && lienMiroir.compte.id===compteVirementApres.id){
+            lienMiroir.transaction.montant = montant;
+            lienMiroir.transaction.date = date;
+            lienMiroir.transaction.type = type==='sortie' ? 'entree' : 'sortie';
+          } else {
+            supprimerMiroirLie(t);
+            t.miroirId = null;
+            if(compteVirementApres) creerMiroirVirement(t);
+          }
+        } else if(compteVirementApres){
+          creerMiroirVirement(t);
+        }
         // Conversion en récurrent : uniquement possible si le mouvement n'appartient pas déjà à
         // une série (champ masqué dans ce cas — voir ouvrirModal). Réutilise le même générateur
         // que pour une création : comme il part de la date du mouvement (pas d'aujourd'hui), les
@@ -2121,6 +2202,11 @@
           t.recurrenceFrequence = frequenceConv;
           var occConv = genererOccurrencesRecurrentes(t, frequenceConv);
           state.transactions = state.transactions.concat(occConv);
+          // t lui-même est déjà géré par le bloc miroir ci-dessus ; seules les occurrences
+          // nouvellement générées par la conversion restent à traiter, avec la même règle de départ.
+          occConv.forEach(function(occ){
+            if(occ.date >= DATE_DEBUT_MIROIR_VIREMENTS_RECURRENTS) creerMiroirVirement(occ);
+          });
           var aujourdhuiConv = dateLocaleISO();
           var nbPassees = occConv.filter(function(o){ return o.date <= aujourdhuiConv; }).length;
           var nbFutures = occConv.length - nbPassees;
@@ -2142,10 +2228,18 @@
         var occurrences = genererOccurrencesRecurrentes(nouvelle, frequence);
         state.transactions = state.transactions.concat(occurrences);
         state.transactions.push(nouvelle);
+        // Miroir sur le compte d'épargne pour une série récurrente : seulement à partir du 1er
+        // septembre 2026 (voir DATE_DEBUT_MIROIR_VIREMENTS_RECURRENTS), jamais avant.
+        occurrences.concat([nouvelle]).forEach(function(occ){
+          if(occ.date >= DATE_DEBUT_MIROIR_VIREMENTS_RECURRENTS) creerMiroirVirement(occ);
+        });
         var suffixe = frequence==='annuel' ? 'reconduite l\'an prochain' : 'jusqu\'à fin d\'année';
         toast(occurrences.length>0 ? ('Mouvement ajouté + '+occurrences.length+' échéance(s) '+suffixe) : 'Mouvement ajouté');
       } else {
         state.transactions.push(nouvelle);
+        // Virement ponctuel : toujours reflété immédiatement sur le compte d'épargne, sans
+        // restriction de date (pas le même risque de double-comptage rétroactif qu'une série).
+        creerMiroirVirement(nouvelle);
         toast('Mouvement ajouté');
       }
     }
@@ -2161,6 +2255,8 @@
       var compte = getCompte(compteSource);
       if(!compte) return;
       if(!confirm('Supprimer ce mouvement ?')) return;
+      var tCompteSuppr = (compte.transactions||[]).find(function(x){return x.id===id;});
+      if(tCompteSuppr) supprimerMiroirLie(tCompteSuppr);
       compte.transactions = (compte.transactions||[]).filter(function(x){return x.id!==id;});
       fermerModal();
       sauvegarder();
@@ -2172,8 +2268,11 @@
     if(!t) return;
     if(!confirm('Supprimer ce mouvement ?')) return;
     if(t.recurrenceId && confirm('Ce mouvement fait partie d\'une série récurrente. Supprimer aussi ses occurrences à venir (à partir de cette date) ?')){
+      var occurrencesASupprimer = state.transactions.filter(function(x){ return x.recurrenceId===t.recurrenceId && x.date>=t.date; });
+      occurrencesASupprimer.forEach(function(x){ if(x.miroirId) supprimerMiroirLie(x); });
       state.transactions = state.transactions.filter(function(x){ return !(x.recurrenceId===t.recurrenceId && x.date>=t.date); });
     } else {
+      if(t.miroirId) supprimerMiroirLie(t);
       state.transactions = state.transactions.filter(function(x){return x.id!==id;});
     }
     fermerModal();
