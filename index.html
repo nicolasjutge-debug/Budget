@@ -338,6 +338,15 @@
       <label class="etiquette-champ" id="ligne-champ-categorie">Catégorie
         <select id="input-categorie" class="input-select"></select>
       </label>
+      <label class="etiquette-champ">Type de paiement (facultatif)
+        <select id="input-type-paiement" class="input-select">
+          <option value="">—</option>
+          <option value="carte">Carte</option>
+          <option value="cheque">Chèque</option>
+          <option value="virement">Virement</option>
+          <option value="prelevement">Prélèvement</option>
+        </select>
+      </label>
       <label class="etiquette-champ">Description (facultatif)
         <input type="text" id="input-description" placeholder="Ex. Courses Carrefour" class="input-texte">
       </label>
@@ -356,6 +365,7 @@
         <span class="aide-texte" style="margin:0">Jusqu'à fin d'année ; sur un mouvement déjà ancien, les échéances passées sont aussi générées et impactent le solde.</span>
       </label>
       <button type="submit" class="bouton-principal">Enregistrer</button>
+      <button type="button" id="btn-dupliquer-transaction" class="bouton-secondaire" style="display:none">Dupliquer ce mouvement</button>
       <button type="button" id="btn-supprimer-transaction" class="bouton-danger" style="display:none">Supprimer ce mouvement</button>
     </form>
   </div>
@@ -389,6 +399,7 @@
   ];
   var PALETTE_CATEGORIES = ['#2B5F6B','#B8863C','#4A5C8A','#7A4C6D','#6E8C5A','#C4703F','#6B8CAE','#1E4B3A','#8A7F6E'];
   var LIBELLES_FREQUENCE = {hebdomadaire:'hebdo', mensuel:'mensuel', trimestriel:'trim.', semestriel:'semestre', annuel:'annuel'};
+  var LIBELLES_TYPE_PAIEMENT = {carte:'Carte', cheque:'Chèque', virement:'Virement', prelevement:'Prélèvement'};
   var LIBELLES_FILTRE_RECURRENCE = {toutes:'Tous', ponctuels:'Ponctuels', recurrents:'Récurrents'};
 
   var state = {
@@ -757,7 +768,7 @@
   function fabriquerOccurrence(base, dateOccurrence){
     return {
       id: genId(), type: base.type, montant: base.montant, categorie: base.categorie,
-      description: base.description, date: dateOccurrence,
+      description: base.description, date: dateOccurrence, typePaiement: base.typePaiement,
       recurrent: true, recurrenceId: base.recurrenceId, recurrenceFrequence: base.recurrenceFrequence
     };
   }
@@ -985,7 +996,7 @@
         '<span class="ligne-mvt-tick" style="background:'+cat.couleur+'"></span>' +
         '<span class="ligne-mvt-corps">' +
           '<span class="ligne-mvt-titre">'+escapeHtml(t.description || cat.nom)+'</span>' +
-          '<span class="ligne-mvt-sous">'+escapeHtml(cat.nom)+' · '+formatDateAffichage(t.date)+marques+'</span>' +
+          '<span class="ligne-mvt-sous">'+escapeHtml(cat.nom)+' · '+formatDateAffichage(t.date)+(t.typePaiement && LIBELLES_TYPE_PAIEMENT[t.typePaiement] ? ' · '+LIBELLES_TYPE_PAIEMENT[t.typePaiement] : '')+marques+'</span>' +
         '</span>' +
         '<span class="ligne-mvt-montant '+classe+'">'+signe+formatMontant(t.montant)+'</span>' +
       '</button>';
@@ -1854,6 +1865,17 @@
     if(l.indexOf('dgfip') !== -1) return 'remboursements';
     return 'autres-revenus';
   }
+  // Détecte le type de paiement à partir des préfixes standards d'un libellé de relevé bancaire
+  // français (CARTE, CHQ/REM, PRLV, VIR/VRST). Retourne '' si le libellé ne correspond à aucun des
+  // 4 types proposés dans le formulaire (ex. retrait DAB, échéance de prêt) plutôt que de deviner.
+  function detecterTypePaiement(libelle){
+    var l = (libelle||'').toUpperCase();
+    if(/^CARTE\b/.test(l)) return 'carte';
+    if(/^(CHQ|REM)\b/.test(l)) return 'cheque';
+    if(/^PRLV\b/.test(l)) return 'prelevement';
+    if(/^(VIR|VRST)\b/.test(l)) return 'virement';
+    return '';
+  }
   function analyserReleveCSV(texte){
     if(!texte) return [];
     var lignes = texte.split(/\r?\n/).filter(function(l){ return l.trim().length>0; });
@@ -1877,9 +1899,9 @@
       if(!date || !libelle) continue;
 
       if(debit > 0){
-        resultat.push({id: genId(), type:'sortie', montant: Math.round(debit*100)/100, categorie: categoriserSortieReleve(libelle), description: libelle, date: date});
+        resultat.push({id: genId(), type:'sortie', montant: Math.round(debit*100)/100, categorie: categoriserSortieReleve(libelle), description: libelle, date: date, typePaiement: detecterTypePaiement(libelle)});
       } else if(credit > 0){
-        resultat.push({id: genId(), type:'entree', montant: Math.round(credit*100)/100, categorie: categoriserEntreeReleve(libelle), description: libelle, date: date});
+        resultat.push({id: genId(), type:'entree', montant: Math.round(credit*100)/100, categorie: categoriserEntreeReleve(libelle), description: libelle, date: date, typePaiement: detecterTypePaiement(libelle)});
       }
     }
     return resultat;
@@ -2056,9 +2078,11 @@
     var form = document.getElementById('form-transaction');
     form.reset();
     document.getElementById('btn-supprimer-transaction').style.display = 'none';
+    document.getElementById('btn-dupliquer-transaction').style.display = 'none';
     document.getElementById('input-id-transaction').value = '';
     document.getElementById('input-date').value = dateLocaleISO();
     document.getElementById('input-recurrence').value = 'aucune';
+    document.getElementById('input-type-paiement').value = '';
     document.querySelectorAll('.segment-type button').forEach(function(b){ b.classList.remove('actif'); });
     remplirComptesCible();
     var selectCompte = document.getElementById('input-compte-cible');
@@ -2082,9 +2106,11 @@
       document.getElementById('input-id-transaction').value = t.id;
       document.getElementById('input-montant').value = String(t.montant).replace('.', ',');
       if(!compteCibleId) document.getElementById('input-categorie').value = t.categorie;
+      document.getElementById('input-type-paiement').value = t.typePaiement || '';
       document.getElementById('input-description').value = t.description || '';
       document.getElementById('input-date').value = t.date;
       document.getElementById('btn-supprimer-transaction').style.display = 'block';
+      document.getElementById('btn-dupliquer-transaction').style.display = 'block';
       // On ne déplace pas un mouvement existant d'un compte à l'autre depuis ce sélecteur — il
       // reste là où il a été créé ; le modifier reviendrait à le supprimer puis le recréer ailleurs.
       selectCompte.disabled = true;
@@ -2134,6 +2160,7 @@
     if(!(montant>0)){ toast('Montant invalide'); return; }
     var description = document.getElementById('input-description').value.trim();
     var date = document.getElementById('input-date').value || dateLocaleISO();
+    var typePaiement = document.getElementById('input-type-paiement').value;
     var selectCompte = document.getElementById('input-compte-cible');
     var compteCible = selectCompte.disabled ? document.getElementById('input-compte-source').value : selectCompte.value;
 
@@ -2143,10 +2170,10 @@
       if(!compte){ toast('Compte introuvable'); return; }
       if(id){
         var tCompte = (compte.transactions||[]).find(function(x){return x.id===id;});
-        if(tCompte){ tCompte.type=type; tCompte.montant=montant; tCompte.description=description; tCompte.date=date; }
+        if(tCompte){ tCompte.type=type; tCompte.montant=montant; tCompte.description=description; tCompte.date=date; tCompte.typePaiement=typePaiement; }
         toast('Mouvement modifié');
       } else {
-        compte.transactions = (compte.transactions||[]).concat([{id:genId(), type:type, montant:montant, description:description, date:date}]);
+        compte.transactions = (compte.transactions||[]).concat([{id:genId(), type:type, montant:montant, description:description, date:date, typePaiement:typePaiement}]);
         toast('Mouvement ajouté à « '+compte.nom+' »');
       }
       fermerModal();
@@ -2161,7 +2188,7 @@
       var t = state.transactions.find(function(x){return x.id===id;});
       if(t){
         var categoriePrecedente = t.categorie;
-        t.type=type; t.montant=montant; t.categorie=categorie; t.description=description; t.date=date;
+        t.type=type; t.montant=montant; t.categorie=categorie; t.description=description; t.date=date; t.typePaiement=typePaiement;
         // Une série récurrente représente une seule et même charge/recette dans le temps : si sa
         // catégorie est corrigée sur une occurrence (ex. reclasser un abonnement mal catégorisé),
         // toutes les autres occurrences de la série (passées et futures, même recurrenceId) doivent
@@ -2220,7 +2247,7 @@
       }
     } else {
       var frequence = document.getElementById('input-recurrence').value;
-      var nouvelle = {id: genId(), type:type, montant:montant, categorie:categorie, description:description, date:date};
+      var nouvelle = {id: genId(), type:type, montant:montant, categorie:categorie, description:description, date:date, typePaiement:typePaiement};
       if(frequence !== 'aucune'){
         nouvelle.recurrent = true;
         nouvelle.recurrenceId = nouvelle.id;
@@ -2279,6 +2306,23 @@
     sauvegarder();
     render();
     toast('Mouvement supprimé');
+  });
+  document.getElementById('btn-dupliquer-transaction').addEventListener('click', function(){
+    // Un duplicata est un mouvement autonome : on repart en mode « ajout » avec les mêmes valeurs
+    // (montant, catégorie, type de paiement, description, compte cible), mais sans id, sans lien de
+    // récurrence ni de miroir — dupliquer une occurrence d'une série ne doit pas la lier à cette
+    // série. La date est remise à aujourd'hui (cas d'usage le plus courant), modifiable avant
+    // d'enregistrer.
+    document.getElementById('input-id-transaction').value = '';
+    document.getElementById('input-date').value = dateLocaleISO();
+    document.getElementById('titre-modal').textContent = 'Ajouter un mouvement';
+    document.getElementById('btn-supprimer-transaction').style.display = 'none';
+    document.getElementById('btn-dupliquer-transaction').style.display = 'none';
+    document.getElementById('input-recurrence').value = 'aucune';
+    var selectCompteDup = document.getElementById('input-compte-cible');
+    selectCompteDup.disabled = false;
+    document.getElementById('ligne-champ-recurrent').style.display = selectCompteDup.value ? 'none' : 'flex';
+    toast('Duplicata prêt — modifiez si besoin puis enregistrez');
   });
   document.getElementById('barre-periode').addEventListener('click', function(e){
     var btn = e.target.closest('.chip-periode');
