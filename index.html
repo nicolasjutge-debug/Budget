@@ -1886,7 +1886,11 @@
     var idxLibelle = entetes.findIndex(function(h){ return h.indexOf('libelle')!==-1; });
     var idxDebit = entetes.findIndex(function(h){ return h.indexOf('debit')!==-1; });
     var idxCredit = entetes.findIndex(function(h){ return h.indexOf('credit')!==-1; });
-    if(idxDate===-1 || idxLibelle===-1 || (idxDebit===-1 && idxCredit===-1)) return null;
+    if(idxDate===-1 || idxLibelle===-1 || (idxDebit===-1 && idxCredit===-1)){
+      // Pas un relevé bancaire à en-tête standard : avant d'abandonner, tente le format « État »
+      // hiérarchique par catégorie/sous-catégorie avec sous-totaux (ex. export Bankin').
+      return analyserReleveHierarchique(texte);
+    }
 
     var resultat = [];
     for(var i=1;i<lignes.length;i++){
@@ -1905,6 +1909,36 @@
       }
     }
     return resultat;
+  }
+  // Format « État » hiérarchique (ex. export Bankin') : pas de ligne d'en-tête exploitable, la
+  // structure est Revenus/Dépenses > catégorie > sous-catégorie > mouvements > sous-totaux > totaux.
+  // Repère fiable d'une VRAIE ligne de mouvement, peu importe le texte des en-têtes/totaux autour :
+  // colonne 2 (index 1) = une date JJ/MM/AAAA, colonne 1 (index 0) vide. Le signe du montant (col.
+  // 10, index 9) donne le sens réel (entrée si positif, sortie si négatif) indépendamment de la
+  // section Revenus/Dépenses dans laquelle la ligne se trouve (une correction/un retour peut être
+  // négatif même sous Revenus, et inversement).
+  function analyserReleveHierarchique(texte){
+    var lignes = texte.split(/\r?\n/).filter(function(l){ return l.trim().length>0; });
+    if(lignes.length===0) return null;
+    var delimiteur = detecterDelimiteurCSV(lignes[0]);
+    var reDate = /^\d{2}\/\d{2}\/\d{4}$/;
+    var resultat = [];
+    for(var i=0;i<lignes.length;i++){
+      var champs = parserLigneCSV(lignes[i], delimiteur);
+      if((champs[0]||'').trim()!=='' ) continue; // ligne d'en-tête de catégorie ou de total général
+      var dateStr = (champs[1]||'').trim();
+      if(!reDate.test(dateStr)) continue; // pas une ligne de mouvement (sous-titre, sous-total…)
+      var libelle = (champs[5]||'').trim();
+      var date = convertirDateReleve(dateStr);
+      var montant = parseMontant((champs[9]||'').replace(/€/g,''));
+      if(!date || !libelle || isNaN(montant) || montant===0) continue;
+      if(montant > 0){
+        resultat.push({id: genId(), type:'entree', montant: Math.round(montant*100)/100, categorie: categoriserEntreeReleve(libelle), description: libelle, date: date, typePaiement: detecterTypePaiement(libelle)});
+      } else {
+        resultat.push({id: genId(), type:'sortie', montant: Math.round(Math.abs(montant)*100)/100, categorie: categoriserSortieReleve(libelle), description: libelle, date: date, typePaiement: detecterTypePaiement(libelle)});
+      }
+    }
+    return resultat.length>0 ? resultat : null;
   }
   function signatureTransaction(t){
     return t.date+'|'+t.type+'|'+t.montant.toFixed(2)+'|'+t.description;
