@@ -350,7 +350,7 @@
       </label>
       <label class="etiquette-champ" id="ligne-champ-compte-virement" style="display:none">Compte d'épargne
         <select id="input-compte-virement" class="input-select"></select>
-        <span class="aide-texte" style="margin:0">Crédite/débite automatiquement ce compte du même montant.</span>
+        <span class="aide-texte" id="aide-compte-virement" style="margin:0">Crédite ce compte du même montant (sortie du Courant).</span>
       </label>
       <label class="etiquette-champ" id="ligne-champ-miroir-depuis" style="display:none">Miroir à partir de
         <input type="date" id="input-miroir-depuis" class="input-texte">
@@ -1474,7 +1474,7 @@
   }
   function renderBlocComptes(){
     var html = '<div class="bloc-reglage"><h3 class="sous-titre">Comptes d\'épargne</h3>' +
-      '<p class="aide-texte">Créez un compte d\'épargne manuellement ou en important son relevé CSV : il fonctionne comme son propre grand livre (solde, historique). Vos virements deviennent ensuite sélectionnables comme catégorie de sortie « Virement vers … » et comptent comme épargne dans votre taux réel.</p>';
+      '<p class="aide-texte">Créez un compte d\'épargne manuellement ou en important son relevé CSV : il fonctionne comme son propre grand livre (solde, historique). Pour un virement vers ou depuis ce compte (ponctuel ou récurrent, dans les deux sens), choisissez Type de paiement = Virement dans le formulaire d\'un mouvement Courant — le sens Sortie/Entrée déjà sélectionné détermine si ce compte est crédité ou débité.</p>';
     if(state.comptes.length===0){
       html += '<p class="aide-texte">Aucun compte d\'épargne pour le moment.</p>';
     } else {
@@ -1883,49 +1883,82 @@
   function sauvegarderIdentifiantsCloud(){
     return storageSetAvecRetry('budget-grandlivre-jsonbin', JSON.stringify(identifiantsCloud));
   }
+  // Compression gzip native (CompressionStream/DecompressionStream), disponible dans tous les
+  // navigateurs récents sans dépendance externe (standard depuis 2023) — réduit le JSON envoyé de
+  // 70 à 90% en général sur ce type de données (mêmes noms de champs répétés à chaque mouvement),
+  // ce qui repousse largement la limite de 100 Ko du compte JSONBin gratuit. Se dégrade sans erreur
+  // vers un envoi non compressé si l'API est absente (navigateur ancien) — recupererDepuisJsonBin
+  // sait lire les deux formats.
+  function compressionDisponible(){
+    return typeof CompressionStream !== 'undefined' && typeof DecompressionStream !== 'undefined';
+  }
+  function compresserTexte(texte){
+    var flux = new Blob([texte]).stream().pipeThrough(new CompressionStream('gzip'));
+    return new Response(flux).arrayBuffer().then(function(buffer){
+      var octets = new Uint8Array(buffer);
+      var binaire = '';
+      for(var i=0;i<octets.length;i++) binaire += String.fromCharCode(octets[i]);
+      return btoa(binaire);
+    });
+  }
+  function decompresserBase64(base64){
+    var binaire = atob(base64);
+    var octets = new Uint8Array(binaire.length);
+    for(var i=0;i<binaire.length;i++) octets[i] = binaire.charCodeAt(i);
+    var flux = new Blob([octets]).stream().pipeThrough(new DecompressionStream('gzip'));
+    return new Response(flux).text();
+  }
   function envoyerVersJsonBin(){
     if(!identifiantsCloud.masterKey){ toast('Renseignez votre clé X-Master-Key'); return; }
-    var corps = JSON.stringify(state);
-    // Le compte JSONBin gratuit plafonne à 100 Ko par bin — au-delà, l'envoi échoue systématiquement
-    // quelle que soit la validité de la clé (la récupération, elle, continue de fonctionner puisque
-    // c'est une simple lecture de ce qui a déjà été envoyé avec succès par le passé). Le vérifier
-    // avant d'envoyer évite un message trompeur du type « vérifiez la clé » qui ne correspond pas au
-    // vrai problème et fait perdre du temps à chercher au mauvais endroit.
-    var tailleKo = Math.ceil(new Blob([corps]).size / 1024);
-    if(tailleKo > 100){
-      toast('Vos données ('+tailleKo+' Ko) dépassent la limite de 100 Ko du compte JSONBin gratuit — la sauvegarde cloud est bloquée par ce plafond, pas par votre clé. Vos données restent en sécurité en local ; utilisez Export JSON (Réglages) pour une sauvegarde manuelle en attendant.');
-      return;
-    }
-    var estCreation = !identifiantsCloud.binId;
-    var url = estCreation ? 'https://api.jsonbin.io/v3/b' : ('https://api.jsonbin.io/v3/b/'+identifiantsCloud.binId);
-    toast(estCreation ? 'Création du bin…' : 'Envoi en cours…');
-    fetch(url, {
-      method: estCreation ? 'POST' : 'PUT',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Master-Key': identifiantsCloud.masterKey,
-        'X-Bin-Name': 'grand-livre-budget'
-      },
-      body: corps
-    }).then(function(res){
-      if(!res.ok){
-        return res.text().then(function(texte){
-          throw new Error('HTTP '+res.status+(texte ? ' — '+texte.slice(0,150) : ''));
-        });
+    var corpsBrut = JSON.stringify(state);
+    var preparerCorps = compressionDisponible()
+      ? compresserTexte(corpsBrut).then(function(b64){ return JSON.stringify({gz:b64}); })
+      : Promise.resolve(corpsBrut);
+    preparerCorps.then(function(corps){
+      // Le compte JSONBin gratuit plafonne à 100 Ko par bin — au-delà, l'envoi échoue
+      // systématiquement quelle que soit la validité de la clé (la récupération, elle, continue de
+      // fonctionner puisque c'est une simple lecture de ce qui a déjà été envoyé avec succès par le
+      // passé). Le vérifier avant d'envoyer évite un message trompeur du type « vérifiez la clé » qui
+      // ne correspond pas au vrai problème. La taille est désormais mesurée APRÈS compression.
+      var tailleKo = Math.ceil(new Blob([corps]).size / 1024);
+      if(tailleKo > 100){
+        toast('Vos données ('+tailleKo+' Ko'+(compressionDisponible()?' compressées':'')+') dépassent la limite de 100 Ko du compte JSONBin gratuit — la sauvegarde cloud est bloquée par ce plafond, pas par votre clé. Vos données restent en sécurité en local ; utilisez Export JSON (Réglages) pour une sauvegarde manuelle en attendant.');
+        return;
       }
-      return res.json();
-    }).then(function(data){
-      if(estCreation && data.metadata && data.metadata.id){
-        identifiantsCloud.binId = data.metadata.id;
-        sauvegarderIdentifiantsCloud();
-        renderReglages();
-      }
-      toast('Envoyé vers le cloud');
+      var estCreation = !identifiantsCloud.binId;
+      var url = estCreation ? 'https://api.jsonbin.io/v3/b' : ('https://api.jsonbin.io/v3/b/'+identifiantsCloud.binId);
+      toast(estCreation ? 'Création du bin…' : 'Envoi en cours…');
+      fetch(url, {
+        method: estCreation ? 'POST' : 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Master-Key': identifiantsCloud.masterKey,
+          'X-Bin-Name': 'grand-livre-budget'
+        },
+        body: corps
+      }).then(function(res){
+        if(!res.ok){
+          return res.text().then(function(texte){
+            throw new Error('HTTP '+res.status+(texte ? ' — '+texte.slice(0,150) : ''));
+          });
+        }
+        return res.json();
+      }).then(function(data){
+        if(estCreation && data.metadata && data.metadata.id){
+          identifiantsCloud.binId = data.metadata.id;
+          sauvegarderIdentifiantsCloud();
+          renderReglages();
+        }
+        toast('Envoyé vers le cloud');
+      }).catch(function(e){
+        console.error('Erreur envoi JSONBin', e);
+        // Message précis (code HTTP + détail de l'API) plutôt que le générique « vérifiez la clé »
+        // d'avant, qui pointait toujours vers la clé même quand ce n'était pas la cause réelle.
+        toast('Échec de l\'envoi : '+(e && e.message ? e.message : 'erreur réseau'));
+      });
     }).catch(function(e){
-      console.error('Erreur envoi JSONBin', e);
-      // Message précis (code HTTP + détail de l'API) plutôt que le générique « vérifiez la clé »
-      // d'avant, qui pointait toujours vers la clé même quand ce n'était pas la cause réelle.
-      toast('Échec de l\'envoi : '+(e && e.message ? e.message : 'erreur réseau'));
+      console.error('Erreur de compression', e);
+      toast('Échec de la préparation de l\'envoi');
     });
   }
   function recupererDepuisJsonBin(){
@@ -1939,12 +1972,19 @@
       return res.json();
     }).then(function(data){
       var recu = data.record || {};
+      // Compatible avec les deux formats : un envoi compressé récent ({gz:"..."}) ou un envoi brut
+      // plus ancien (l'état directement) — voir envoyerVersJsonBin.
+      return (recu.gz && compressionDisponible())
+        ? decompresserBase64(recu.gz).then(function(texte){ return JSON.parse(texte); })
+        : recu;
+    }).then(function(recu){
       if(Array.isArray(recu.transactions)) state.transactions = recu.transactions;
       if(Array.isArray(recu.categoriesSortie)) state.categoriesSortie = recu.categoriesSortie;
       if(Array.isArray(recu.categoriesEntree)) state.categoriesEntree = recu.categoriesEntree;
       if(typeof recu.objectifEpargne === 'number') state.objectifEpargne = recu.objectifEpargne;
       if(typeof recu.soldeInitial === 'number') state.soldeInitial = recu.soldeInitial;
       if(Array.isArray(recu.comptes)) state.comptes = recu.comptes;
+      if(Array.isArray(recu.categoriesSupprimees)) state.categoriesSupprimees = recu.categoriesSupprimees;
       sauvegarder();
       render();
       toast('Données récupérées depuis le cloud');
@@ -2239,12 +2279,22 @@
     appliquerVisibiliteCompteVirement();
   }
   // Le sous-champ « Compte d'épargne » n'a de sens que pour un mouvement du grand livre (pas un
-  // mouvement déjà interne à un compte) ET quand Type de paiement = Virement est choisi.
+  // mouvement déjà interne à un compte) ET quand Type de paiement = Virement est choisi. Le sens
+  // (créditer ou débiter ce compte) suit le segment Sortie/Entrée déjà sélectionné plus haut dans le
+  // formulaire — le texte d'aide le rend explicite pour qu'un virement récurrent DEPUIS un compte
+  // d'épargne VERS Courant (Entrée + Virement + compte + récurrence) soit aussi facile à trouver que
+  // le sens inverse.
   function appliquerVisibiliteCompteVirement(){
     var estCompteCible = !!document.getElementById('input-compte-cible').value;
     var estVirement = document.getElementById('input-type-paiement').value === 'virement';
     var afficherCompte = !estCompteCible && estVirement && state.comptes.length>0;
     document.getElementById('ligne-champ-compte-virement').style.display = afficherCompte ? 'flex' : 'none';
+    if(afficherCompte){
+      var typeActuel = document.getElementById('champ-type-actif').value;
+      document.getElementById('aide-compte-virement').textContent = typeActuel==='entree'
+        ? 'Débite ce compte du même montant (l\'argent part de ce compte vers Courant).'
+        : 'Crédite ce compte du même montant (l\'argent part de Courant vers ce compte).';
+    }
     // « Miroir à partir de » n'a de sens que pour une SÉRIE récurrente (un virement ponctuel se
     // reflète toujours immédiatement, sans possibilité de décalage) et un compte effectivement
     // choisi (pas "Aucun (virement classique)").
@@ -2349,6 +2399,7 @@
       var type = btn.dataset.type;
       document.getElementById('champ-type-actif').value = type;
       remplirCategories(type);
+      appliquerVisibiliteCompteVirement();
     });
   });
   document.getElementById('form-transaction').addEventListener('submit', function(e){
