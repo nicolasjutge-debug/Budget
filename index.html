@@ -324,6 +324,7 @@
     <form id="form-transaction" class="form-transaction">
       <input type="hidden" id="input-id-transaction">
       <input type="hidden" id="input-compte-source">
+      <input type="hidden" id="input-est-recurrent-existant" value="">
       <input type="hidden" id="champ-type-actif" value="sortie">
       <label class="etiquette-champ">Compte
         <select id="input-compte-cible" class="input-select"></select>
@@ -346,6 +347,14 @@
           <option value="virement">Virement</option>
           <option value="prelevement">Prélèvement</option>
         </select>
+      </label>
+      <label class="etiquette-champ" id="ligne-champ-compte-virement" style="display:none">Compte d'épargne
+        <select id="input-compte-virement" class="input-select"></select>
+        <span class="aide-texte" style="margin:0">Crédite/débite automatiquement ce compte du même montant.</span>
+      </label>
+      <label class="etiquette-champ" id="ligne-champ-miroir-depuis" style="display:none">Miroir à partir de
+        <input type="date" id="input-miroir-depuis" class="input-texte">
+        <span class="aide-texte" style="margin:0">Les échéances de la série avant cette date restent étiquetées comme virement mais ne créditent/débitent pas le compte (déjà couvertes par un import CSV, par exemple). Laisser vide pour refléter toute la série dès le début.</span>
       </label>
       <label class="etiquette-champ">Description (facultatif)
         <input type="text" id="input-description" placeholder="Ex. Courses Carrefour" class="input-texte">
@@ -417,7 +426,13 @@
     // Comptes d'épargne : chacun fonctionne comme un mini grand livre autonome, alimenté par son
     // propre relevé CSV (pas par duplication des virements du compte principal — voir note à
     // l'import). [{id, nom, couleur, soldeInitial, transactions:[...], dateCreation}]
-    comptes: []
+    comptes: [],
+    // Catégories supprimées alors qu'encore utilisées par des mouvements existants (voir
+    // supprimerCategorie) : conservées pour que ces mouvements gardent un nom/une couleur
+    // significatifs (voir getCategorie) et que Répartition reste cohérente (voir
+    // repartitionParCategorie), avec une option de restauration en Réglages.
+    // [{id, nom, couleur, type, dateSuppression}]
+    categoriesSupprimees: []
   };
   // Séparé de `state` à dessein : ne doit jamais se retrouver dans un export JSON/Excel partagé.
   var identifiantsCloud = { masterKey: '', binId: '' };
@@ -473,6 +488,8 @@
     // Un mouvement de compte d'épargne ajouté manuellement n'a pas de categorie du tout (id vide) —
     // à distinguer d'une vraie catégorie supprimée (id non vide mais qui ne correspond plus à rien).
     if(!id) return {nom: type==='entree' ? 'Entrée' : 'Sortie', couleur:'#8A7F6E'};
+    var supprimee = state.categoriesSupprimees.find(function(c){ return c.id===id && c.type===type; });
+    if(supprimee) return {nom: supprimee.nom+' (supprimée)', couleur: supprimee.couleur};
     return {nom:'Catégorie supprimée', couleur:'#8A7F6E'};
   }
   // ---------- Comptes d'épargne ----------
@@ -515,10 +532,11 @@
     if(tCourant) return {source:'courant', transaction:tCourant};
     return null;
   }
-  // transactionCourant doit avoir categorie = id d'un compte d'épargne. No-op silencieux sinon (ou
-  // si ce compte n'existe plus) — appelable sans vérification préalable par l'appelant.
+  // transactionCourant.compteVirement doit être l'id d'un compte d'épargne (sélectionné via Type de
+  // paiement = Virement). No-op silencieux sinon (ou si ce compte n'existe plus) — appelable sans
+  // vérification préalable par l'appelant.
   function creerMiroirVirement(transactionCourant){
-    var compte = getCompte(transactionCourant.categorie);
+    var compte = getCompte(transactionCourant.compteVirement);
     if(!compte) return null;
     var miroirId = transactionCourant.miroirId || genId();
     transactionCourant.miroirId = miroirId;
@@ -541,6 +559,23 @@
     } else {
       state.transactions = state.transactions.filter(function(x){ return x.id!==trouve.transaction.id; });
     }
+  }
+  // Recalcule les écritures miroir de toute une série récurrente après un changement du seuil
+  // « Miroir à partir de » : crée le miroir manquant pour toute occurrence désormais couverte
+  // (date >= seuil, ou toujours couverte si seuil vide) qui n'en a pas encore, et retire le miroir
+  // de toute occurrence qui n'est plus couverte mais en avait un. Idempotent — sans effet si l'état
+  // correspond déjà au seuil demandé.
+  function resynchroniserMiroirsSerie(recurrenceId, seuil, compteVirementId){
+    state.transactions.forEach(function(occ){
+      if(occ.recurrenceId !== recurrenceId) return;
+      var couverte = !!compteVirementId && occ.date >= (seuil || occ.date);
+      if(couverte && !occ.miroirId){
+        creerMiroirVirement(occ);
+      } else if(!couverte && occ.miroirId){
+        supprimerMiroirLie(occ);
+        occ.miroirId = null;
+      }
+    });
   }
 
   // ---------- Stockage ----------
@@ -613,6 +648,7 @@
         if(typeof data.objectifsAutoSync === 'boolean') state.objectifsAutoSync = data.objectifsAutoSync;
         if(Array.isArray(data.archives)) state.archives = data.archives;
         if(Array.isArray(data.comptes)) state.comptes = data.comptes;
+        if(Array.isArray(data.categoriesSupprimees)) state.categoriesSupprimees = data.categoriesSupprimees;
       }
       // Ni donnée existante, ni erreur : vrai premier lancement — state garde ses valeurs par défaut
       // (transactions vides). On n'amorce plus JAMAIS avec un relevé figé en dur dans le code : ce
@@ -710,16 +746,21 @@
     var txs = transactionsPeriode().filter(function(t){return t.type==='sortie';});
     var total = txs.reduce(function(a,t){return a+t.montant;},0);
     var map = {};
-    txs.forEach(function(t){ map[t.categorie] = (map[t.categorie]||0) + t.montant; });
-    // Un virement vers un compte d'épargne est une sortie (categorie = id du compte, voir
-    // remplirCategories) : sans entrée correspondante ici, son montant gonflerait `total` sans
-    // apparaître dans aucune part, ce qui fausserait tous les pourcentages affichés. On l'ajoute
-    // donc comme catégorie à part entière (estCompte:true, objectif fixe à 0 — voir
-    // planOptimisation qui l'exclut du plan, un objectif à 0% n'y aurait pas de sens).
+    // Un virement vers un compte d'épargne (Type de paiement = Virement, compteVirement = id du
+    // compte, voir remplirComptesVirement) est comptabilisé sous ce compte plutôt que sous sa
+    // catégorie propre le cas échéant — sans quoi son montant gonflerait `total` sans apparaître
+    // dans aucune part, faussant tous les pourcentages affichés.
+    txs.forEach(function(t){ var cle = t.compteVirement || t.categorie; map[cle] = (map[cle]||0) + t.montant; });
+    // On ajoute donc chaque compte, et chaque catégorie supprimée mais encore référencée par des
+    // mouvements existants, comme catégorie à part entière (estCompte:true, objectif fixe à 0 — voir
+    // planOptimisation qui les exclut du plan, un objectif à 0% n'y aurait pas de sens pour l'un
+    // comme pour l'autre).
     var toutes = state.categoriesSortie.map(function(cat){
       return {id:cat.id, nom:cat.nom, couleur:cat.couleur, objectif:objectifEffectif(cat), estCompte:false};
     }).concat(state.comptes.map(function(c){
       return {id:c.id, nom:'Virement vers '+c.nom, couleur:c.couleur, objectif:0, estCompte:true};
+    })).concat(state.categoriesSupprimees.filter(function(c){return c.type==='sortie';}).map(function(c){
+      return {id:c.id, nom:c.nom+' (supprimée)', couleur:c.couleur, objectif:0, estCompte:true};
     }));
     return toutes.map(function(cat){
       var montant = map[cat.id] || 0;
@@ -739,10 +780,10 @@
   // des sorties prises en compte pour le taux d'épargne réel, sinon un virement vers l'épargne fait
   // mécaniquement baisser ce taux alors qu'il traduit l'inverse (cf. incohérence -8,9% vs carte
   // Épargne à 47% du plan d'optimisation, qui elle raisonne déjà correctement par catégorie).
-  // Même raisonnement pour un virement vers un compte d'épargne (catégorie = id du compte, voir
-  // remplirCategories) : c'est aussi de l'épargne, pas une dépense.
+  // Même raisonnement pour un virement vers un compte d'épargne (compteVirement renseigné, voir
+  // remplirComptesVirement) : c'est aussi de l'épargne, pas une dépense.
   function montantEpargnePeriode(){
-    return transactionsPeriode().filter(function(t){ return t.type==='sortie' && (t.categorie==='epargne' || getCompte(t.categorie)!==null); })
+    return transactionsPeriode().filter(function(t){ return t.type==='sortie' && (t.categorie==='epargne' || !!t.compteVirement); })
       .reduce(function(a,t){ return a+t.montant; }, 0);
   }
   function epargneNettePeriode(){
@@ -768,8 +809,8 @@
   function fabriquerOccurrence(base, dateOccurrence){
     return {
       id: genId(), type: base.type, montant: base.montant, categorie: base.categorie,
-      description: base.description, date: dateOccurrence, typePaiement: base.typePaiement,
-      recurrent: true, recurrenceId: base.recurrenceId, recurrenceFrequence: base.recurrenceFrequence
+      description: base.description, date: dateOccurrence, typePaiement: base.typePaiement, compteVirement: base.compteVirement,
+      miroirDepuis: base.miroirDepuis, recurrent: true, recurrenceId: base.recurrenceId, recurrenceFrequence: base.recurrenceFrequence
     };
   }
   function genererOccurrencesRecurrentes(base, frequence){
@@ -834,7 +875,12 @@
       existantes[cle] = true;
       var occ = fabriquerOccurrence(base, dateOcc);
       ajouts.push(occ);
-      if(dateOcc >= DATE_DEBUT_MIROIR_VIREMENTS_RECURRENTS) creerMiroirVirement(occ);
+      // Compatibilité : une série créée avant l'ajout du champ « Miroir à partir de » n'a pas du
+      // tout de miroirDepuis (undefined, à distinguer d'une chaîne vide qui signifie "refléter dès
+      // le début") — on applique alors l'ancien seuil fixe pour ne pas changer son comportement déjà
+      // en place. Une série plus récente utilise son propre seuil, choisi dans le formulaire.
+      var seuil = (typeof base.miroirDepuis === 'undefined') ? DATE_DEBUT_MIROIR_VIREMENTS_RECURRENTS : (base.miroirDepuis || dateOcc);
+      if(dateOcc >= seuil) creerMiroirVirement(occ);
     }
     Object.keys(series).forEach(function(rid){
       var occs = series[rid];
@@ -880,6 +926,25 @@
     });
     if(ajouts.length>0) state.transactions = state.transactions.concat(ajouts);
     return ajouts.length;
+  }
+  // Migration ponctuelle et idempotente : un virement vers/depuis un compte d'épargne vivait
+  // auparavant dans le champ categorie (sélectionné dans le menu Catégorie) ; il vit maintenant
+  // dans compteVirement (sélectionné via Type de paiement = Virement). Une transaction déjà migrée,
+  // ou n'ayant jamais été un virement, n'est jamais retouchée : ce nettoyage peut tourner à chaque
+  // démarrage sans risque. Les écritures miroir déjà créées (compte.transactions) ne sont pas
+  // concernées — seul le champ qui les a déclenchées change de nom côté grand livre.
+  function migrerVirementsVersNouveauChamp(){
+    var migrees = 0;
+    state.transactions.forEach(function(t){
+      if(t.compteVirement) return;
+      var compte = getCompte(t.categorie);
+      if(!compte) return;
+      t.compteVirement = t.categorie;
+      t.categorie = '';
+      if(!t.typePaiement) t.typePaiement = 'virement';
+      migrees++;
+    });
+    return migrees;
   }
   // Nettoyage : supprime les occurrences en double d'une même série récurrente à la même date
   // (même recurrenceId + même date), quelle qu'en soit l'origine — génération accidentelle avant
@@ -987,16 +1052,19 @@
     var aujourdhui = dateLocaleISO();
     return '<div class="liste-mvts">' + txs.map(function(t){
       var cat = getCategorie(t.categorie, t.type);
+      var compteVir = t.compteVirement ? getCompte(t.compteVirement) : null;
+      var libelleVirement = compteVir ? ((t.type==='sortie'?'Virement vers ':'Virement depuis ')+compteVir.nom) : null;
       var signe = t.type==='entree' ? '+' : '-';
       var classe = t.type==='entree' ? 'ink-credit' : 'ink-debit';
       var marques = '';
       if(!masquerAVenir && t.date > aujourdhui) marques += ' · <span class="marque-avenir">à venir</span>';
       if(t.recurrent) marques += ' <span class="marque-recurrent" title="Mouvement récurrent">↻'+(LIBELLES_FREQUENCE[t.recurrenceFrequence] ? ' '+LIBELLES_FREQUENCE[t.recurrenceFrequence] : '')+'</span>';
+      var sousTitre = libelleVirement ? libelleVirement : (cat.nom + (t.typePaiement && LIBELLES_TYPE_PAIEMENT[t.typePaiement] ? ' · '+LIBELLES_TYPE_PAIEMENT[t.typePaiement] : ''));
       return '<button class="ligne-mvt" data-id="'+t.id+'" type="button">' +
-        '<span class="ligne-mvt-tick" style="background:'+cat.couleur+'"></span>' +
+        '<span class="ligne-mvt-tick" style="background:'+(compteVir ? compteVir.couleur : cat.couleur)+'"></span>' +
         '<span class="ligne-mvt-corps">' +
-          '<span class="ligne-mvt-titre">'+escapeHtml(t.description || cat.nom)+'</span>' +
-          '<span class="ligne-mvt-sous">'+escapeHtml(cat.nom)+' · '+formatDateAffichage(t.date)+(t.typePaiement && LIBELLES_TYPE_PAIEMENT[t.typePaiement] ? ' · '+LIBELLES_TYPE_PAIEMENT[t.typePaiement] : '')+marques+'</span>' +
+          '<span class="ligne-mvt-titre">'+escapeHtml(t.description || libelleVirement || cat.nom)+'</span>' +
+          '<span class="ligne-mvt-sous">'+escapeHtml(sousTitre)+' · '+formatDateAffichage(t.date)+marques+'</span>' +
         '</span>' +
         '<span class="ligne-mvt-montant '+classe+'">'+signe+formatMontant(t.montant)+'</span>' +
       '</button>';
@@ -1078,14 +1146,16 @@
       triAlpha(state.comptes).map(function(c){ return '<option value="'+c.id+'" '+(c.id===compteAffiche?'selected':'')+'>'+escapeHtml(c.nom)+'</option>'; }).join('') +
     '</select>';
 
+    var moisCourantMvts = dateLocaleISO().slice(0,7);
+
     if(compteAffiche){
       var compte = getCompte(compteAffiche);
-      var txsCompte = (compte.transactions||[]).slice().sort(trierParDateDesc);
+      var txsCompte = (compte.transactions||[]).filter(function(t){ return t.date.slice(0,7)===moisCourantMvts; }).sort(trierParDateDesc);
       el.innerHTML =
         '<h2 class="section-titre">Mouvements</h2>' +
         '<div class="filtres-mouvements">' + selectCompteHtml + '</div>' +
         '<p class="aide-texte">Solde actuel : '+formatMontant(soldeCompte(compte))+'</p>' +
-        renderListeMouvements(txsCompte, false, 'Ce compte est vierge.', 'Ajoutez un mouvement ou importez un relevé pour commencer.');
+        renderListeMouvements(txsCompte, false, 'Aucun mouvement ce mois-ci sur ce compte.', 'Ajoutez un mouvement ou importez un relevé pour commencer.');
       document.getElementById('select-compte-mouvements').addEventListener('change', function(e){
         state.compteAffiche = e.target.value;
         renderMouvements();
@@ -1096,22 +1166,14 @@
 
     var filtreCat = state.filtreCategorie || 'toutes';
     var filtreRec = state.filtreRecurrence || 'toutes';
-    var anneeActuelleMvts = new Date().getFullYear();
-    // Mouvements affiche l'année en cours uniquement — le passé a sa place dans Archives, et le
-    // futur (ex. la prochaine échéance d'une série annuelle, mécaniquement datée l'an prochain)
-    // dans Échéances à venir sur le Dashboard, pas ici.
-    var txs = state.transactions.filter(function(t){ return anneeDe(t)===anneeActuelleMvts; }).sort(trierParDateDesc);
+    // Mouvements affiche le mois en cours uniquement — le passé a sa place dans Archives, et le
+    // futur (ex. la prochaine échéance d'une série annuelle, mécaniquement datée l'an prochain, ou
+    // les mois restants d'une série mensuelle déjà pré-générés jusqu'à décembre) dans Échéances à
+    // venir sur le Dashboard, pas ici.
+    var txs = state.transactions.filter(function(t){ return t.date.slice(0,7)===moisCourantMvts; }).sort(trierParDateDesc);
     if(filtreCat !== 'toutes'){ txs = txs.filter(function(t){ return t.categorie===filtreCat; }); }
     if(filtreRec === 'ponctuels'){ txs = txs.filter(function(t){ return !t.recurrent; }); }
-    else if(filtreRec === 'recurrents'){
-      // Le rattrapage des récurrences (synchroniserRecurrences) peut désormais régénérer plusieurs
-      // mois, voire plusieurs années, d'un coup pour une série longtemps restée sans ouverture de
-      // l'appli — sans ce filtre, « Récurrents » deviendrait une liste énorme couvrant toute l'année
-      // (voire plusieurs). On la restreint donc au mois en cours, la portée la plus utile pour
-      // vérifier « quelles charges récurrentes tombent ce mois-ci ».
-      var moisCourant = dateLocaleISO().slice(0,7);
-      txs = txs.filter(function(t){ return !!t.recurrent && t.date.slice(0,7)===moisCourant; });
-    }
+    else if(filtreRec === 'recurrents'){ txs = txs.filter(function(t){ return !!t.recurrent; }); }
     var toutesCats = triAlpha(state.categoriesSortie.concat(state.categoriesEntree).concat(
       state.comptes.map(function(c){ return {id:c.id, nom:'Virement vers '+c.nom}; })
     ));
@@ -1316,27 +1378,66 @@
   function ajouterCategorie(type){
     var nom = prompt(type==='sortie' ? 'Nom du nouveau poste de dépense :' : 'Nom de la nouvelle source de revenu :');
     if(!nom || !nom.trim()) return;
+    var nomTrim = nom.trim();
     var cats = type==='sortie' ? state.categoriesSortie : state.categoriesEntree;
     var couleur = PALETTE_CATEGORIES[cats.length % PALETTE_CATEGORIES.length];
-    var nouvelle = {id: genId(), nom: nom.trim(), couleur: couleur};
+    var nouvelle = {id: genId(), nom: nomTrim, couleur: couleur};
     if(type==='sortie'){
       nouvelle.objectif = 5;
       reequilibrerObjectifsApresAjout(cats, nouvelle);
     }
     cats.push(nouvelle);
+    // Une catégorie a en général du sens dans les deux sens (ex. « Remboursements » peut se payer ou
+    // se recevoir) : elle est donc automatiquement dupliquée dans l'autre liste si un nom identique
+    // n'y existe pas déjà (comparaison insensible à la casse), pour ne la définir qu'une seule fois.
+    var catsOpposees = type==='sortie' ? state.categoriesEntree : state.categoriesSortie;
+    var dejaPresenteOpposee = catsOpposees.some(function(c){ return c.nom.toLowerCase()===nomTrim.toLowerCase(); });
+    if(!dejaPresenteOpposee){
+      var nouvelleOpposee = {id: genId(), nom: nomTrim, couleur: couleur};
+      if(type==='entree'){
+        nouvelleOpposee.objectif = 5;
+        reequilibrerObjectifsApresAjout(catsOpposees, nouvelleOpposee);
+      }
+      catsOpposees.push(nouvelleOpposee);
+    }
     sauvegarder();
     renderReglages();
     toast(type==='sortie' ? 'Catégorie ajoutée — objectifs réajustés à 100%' : 'Catégorie ajoutée');
   }
   function supprimerCategorie(id, type){
+    var cats = type==='sortie' ? state.categoriesSortie : state.categoriesEntree;
+    var cat = cats.find(function(c){ return c.id===id; });
+    if(!cat) return;
     var enUsage = state.transactions.some(function(t){ return t.categorie===id && t.type===type; });
-    if(enUsage){ toast('Utilisée par des mouvements — impossible à supprimer'); return; }
-    if(!confirm('Supprimer cette catégorie ?')) return;
+    var message = enUsage
+      ? 'Cette catégorie est utilisée par des mouvements existants. Ils resteront affichés avec le nom « '+cat.nom+' (supprimée) » — supprimer quand même ?'
+      : 'Supprimer cette catégorie ?';
+    if(!confirm(message)) return;
     if(type==='sortie') state.categoriesSortie = state.categoriesSortie.filter(function(c){return c.id!==id;});
     else state.categoriesEntree = state.categoriesEntree.filter(function(c){return c.id!==id;});
+    // Conservée pour que les mouvements existants gardent un nom/une couleur significatifs (voir
+    // getCategorie) plutôt que le générique « Catégorie supprimée », et pour que Répartition reste
+    // cohérente (voir repartitionParCategorie) — même logique que pour un compte d'épargne supprimé.
+    state.categoriesSupprimees = state.categoriesSupprimees.filter(function(c){ return c.id!==id; })
+      .concat([{id:id, nom:cat.nom, couleur:cat.couleur, type:type, dateSuppression:dateLocaleISO()}]);
     sauvegarder();
     renderReglages();
     toast('Catégorie supprimée');
+  }
+  function restaurerCategorie(id){
+    var supprimee = state.categoriesSupprimees.find(function(c){ return c.id===id; });
+    if(!supprimee) return;
+    state.categoriesSupprimees = state.categoriesSupprimees.filter(function(c){ return c.id!==id; });
+    var cats = supprimee.type==='sortie' ? state.categoriesSortie : state.categoriesEntree;
+    var restauree = {id: supprimee.id, nom: supprimee.nom, couleur: supprimee.couleur};
+    if(supprimee.type==='sortie'){
+      restauree.objectif = 5;
+      reequilibrerObjectifsApresAjout(cats, restauree);
+    }
+    cats.push(restauree);
+    sauvegarder();
+    renderReglages();
+    toast('Catégorie « '+supprimee.nom+' » restaurée');
   }
   function renderBlocArchives(){
     var aArchiver = anneesDisponiblesPourArchivage();
@@ -1409,6 +1510,21 @@
     '</div>';
     return html;
   }
+  function renderBlocCategoriesSupprimees(){
+    if(state.categoriesSupprimees.length===0) return '';
+    var html = '<div class="bloc-reglage"><h3 class="sous-titre">Catégories supprimées</h3>' +
+      '<p class="aide-texte">Les mouvements qui les utilisaient encore restent affichés avec leur nom d\'origine, suivi de « (supprimée) ». Restaurez-les si besoin de les réutiliser.</p>' +
+      '<div class="liste-categories">' + state.categoriesSupprimees.slice().sort(function(a,b){ return a.nom.localeCompare(b.nom, 'fr', {sensitivity:'base'}); }).map(function(c){
+        var enUsage = state.transactions.some(function(t){ return t.categorie===c.id && t.type===c.type; });
+        return '<div class="ligne-categorie">' +
+          '<span class="ligne-mvt-tick" style="background:'+c.couleur+'"></span>' +
+          '<span style="flex:1">'+escapeHtml(c.nom)+' <span class="aide-texte" style="display:inline">— '+(c.type==='sortie'?'dépense':'recette')+(enUsage?', encore utilisée':'')+'</span></span>' +
+          '<button class="bouton-secondaire" type="button" data-action="restaurer-categorie" data-id="'+c.id+'" style="padding:4px 10px;font-size:13px">Restaurer</button>' +
+        '</div>';
+      }).join('') + '</div>' +
+    '</div>';
+    return html;
+  }
   function renderReglages(){
     var el = document.getElementById('vue-reglages');
     var modeAuto = !!state.objectifsAutoSync;
@@ -1439,6 +1555,7 @@
         '<div class="liste-categories" id="liste-cat-entree">' + triAlpha(state.categoriesEntree).map(function(c){return renderLigneCategorie(c,'entree');}).join('') + '</div>' +
         '<button class="bouton-secondaire" type="button" id="btn-ajouter-cat-entree">+ Ajouter une source</button>' +
       '</div>' +
+      renderBlocCategoriesSupprimees() +
       '<div class="bloc-reglage"><h3 class="sous-titre">Données</h3>' +
         '<button class="bouton-secondaire" type="button" id="btn-import-releve">Importer un relevé bancaire (CSV)</button>' +
         '<input type="file" id="input-import-csv" accept=".csv,text/csv" style="display:none">' +
@@ -1582,6 +1699,9 @@
     document.getElementById('btn-nouveau-compte-epargne').addEventListener('click', function(){ document.getElementById('input-nouveau-compte-csv').click(); });
     document.getElementById('input-nouveau-compte-csv').addEventListener('change', importerNouveauCompteCSV);
     document.getElementById('btn-nouveau-compte-manuel').addEventListener('click', creerCompteManuel);
+    el.querySelectorAll('[data-action="restaurer-categorie"]').forEach(function(btn){
+      btn.addEventListener('click', function(){ restaurerCategorie(btn.dataset.id); });
+    });
   }
 
   // ---------- Export / Import / Reset ----------
@@ -1615,6 +1735,7 @@
         state.objectifsAutoSync = typeof data.objectifsAutoSync==='boolean' ? data.objectifsAutoSync : false;
         state.archives = Array.isArray(data.archives) ? data.archives : [];
         state.comptes = Array.isArray(data.comptes) ? data.comptes : [];
+        state.categoriesSupprimees = Array.isArray(data.categoriesSupprimees) ? data.categoriesSupprimees : [];
         sauvegarder();
         render();
         toast('Import réussi');
@@ -1630,6 +1751,7 @@
     state.transactions = [];
     state.archives = [];
     state.comptes = [];
+    state.categoriesSupprimees = [];
     sauvegarder();
     render();
     toast('Données effacées');
@@ -1763,6 +1885,17 @@
   }
   function envoyerVersJsonBin(){
     if(!identifiantsCloud.masterKey){ toast('Renseignez votre clé X-Master-Key'); return; }
+    var corps = JSON.stringify(state);
+    // Le compte JSONBin gratuit plafonne à 100 Ko par bin — au-delà, l'envoi échoue systématiquement
+    // quelle que soit la validité de la clé (la récupération, elle, continue de fonctionner puisque
+    // c'est une simple lecture de ce qui a déjà été envoyé avec succès par le passé). Le vérifier
+    // avant d'envoyer évite un message trompeur du type « vérifiez la clé » qui ne correspond pas au
+    // vrai problème et fait perdre du temps à chercher au mauvais endroit.
+    var tailleKo = Math.ceil(new Blob([corps]).size / 1024);
+    if(tailleKo > 100){
+      toast('Vos données ('+tailleKo+' Ko) dépassent la limite de 100 Ko du compte JSONBin gratuit — la sauvegarde cloud est bloquée par ce plafond, pas par votre clé. Vos données restent en sécurité en local ; utilisez Export JSON (Réglages) pour une sauvegarde manuelle en attendant.');
+      return;
+    }
     var estCreation = !identifiantsCloud.binId;
     var url = estCreation ? 'https://api.jsonbin.io/v3/b' : ('https://api.jsonbin.io/v3/b/'+identifiantsCloud.binId);
     toast(estCreation ? 'Création du bin…' : 'Envoi en cours…');
@@ -1773,9 +1906,13 @@
         'X-Master-Key': identifiantsCloud.masterKey,
         'X-Bin-Name': 'grand-livre-budget'
       },
-      body: JSON.stringify(state)
+      body: corps
     }).then(function(res){
-      if(!res.ok) throw new Error('HTTP '+res.status);
+      if(!res.ok){
+        return res.text().then(function(texte){
+          throw new Error('HTTP '+res.status+(texte ? ' — '+texte.slice(0,150) : ''));
+        });
+      }
       return res.json();
     }).then(function(data){
       if(estCreation && data.metadata && data.metadata.id){
@@ -1786,7 +1923,9 @@
       toast('Envoyé vers le cloud');
     }).catch(function(e){
       console.error('Erreur envoi JSONBin', e);
-      toast('Échec de l\'envoi — vérifiez la clé');
+      // Message précis (code HTTP + détail de l'API) plutôt que le générique « vérifiez la clé »
+      // d'avant, qui pointait toujours vers la clé même quand ce n'était pas la cause réelle.
+      toast('Échec de l\'envoi : '+(e && e.message ? e.message : 'erreur réseau'));
     });
   }
   function recupererDepuisJsonBin(){
@@ -2071,6 +2210,13 @@
     select.innerHTML = '<option value="">Courant</option>' +
       triAlpha(state.comptes).map(function(c){ return '<option value="'+c.id+'">'+escapeHtml(c.nom)+'</option>'; }).join('');
   }
+  // Compte d'épargne concerné par un virement (Type de paiement = Virement) : "" = aucun (un
+  // virement classique, ex. vers une tierce personne, ne concerne aucun compte d'épargne).
+  function remplirComptesVirement(){
+    var select = document.getElementById('input-compte-virement');
+    select.innerHTML = '<option value="">Aucun (virement classique)</option>' +
+      triAlpha(state.comptes).map(function(c){ return '<option value="'+c.id+'">'+escapeHtml(c.nom)+'</option>'; }).join('');
+  }
   // Cherche une transaction par id d'abord dans le grand livre principal, puis dans chaque compte
   // d'épargne — retourne aussi l'id du compte source ("" pour le grand livre) pour savoir où
   // enregistrer/supprimer ensuite.
@@ -2090,22 +2236,26 @@
     var estCompte = !!compteCibleId;
     document.getElementById('ligne-champ-categorie').style.display = estCompte ? 'none' : 'flex';
     document.getElementById('ligne-champ-recurrent').style.display = (estCompte || (transactionEditee && transactionEditee.recurrenceId)) ? 'none' : 'flex';
+    appliquerVisibiliteCompteVirement();
+  }
+  // Le sous-champ « Compte d'épargne » n'a de sens que pour un mouvement du grand livre (pas un
+  // mouvement déjà interne à un compte) ET quand Type de paiement = Virement est choisi.
+  function appliquerVisibiliteCompteVirement(){
+    var estCompteCible = !!document.getElementById('input-compte-cible').value;
+    var estVirement = document.getElementById('input-type-paiement').value === 'virement';
+    var afficherCompte = !estCompteCible && estVirement && state.comptes.length>0;
+    document.getElementById('ligne-champ-compte-virement').style.display = afficherCompte ? 'flex' : 'none';
+    // « Miroir à partir de » n'a de sens que pour une SÉRIE récurrente (un virement ponctuel se
+    // reflète toujours immédiatement, sans possibilité de décalage) et un compte effectivement
+    // choisi (pas "Aucun (virement classique)").
+    var compteChoisi = !!document.getElementById('input-compte-virement').value;
+    var estRecurrent = document.getElementById('input-recurrence').value !== 'aucune' || document.getElementById('input-est-recurrent-existant').value==='1';
+    document.getElementById('ligne-champ-miroir-depuis').style.display = (afficherCompte && compteChoisi && estRecurrent) ? 'flex' : 'none';
   }
   function remplirCategories(type){
     var select = document.getElementById('input-categorie');
     var cats = triAlpha(type==='sortie' ? state.categoriesSortie : state.categoriesEntree);
-    var html = cats.map(function(c){ return '<option value="'+c.id+'">'+escapeHtml(c.nom)+'</option>'; }).join('');
-    // Chaque compte d'épargne devient un item sélectionnable pour catégoriser un mouvement comme
-    // virement vers (sortie) ou depuis (entrée) ce compte précis — voir getCategorie pour la
-    // résolution du libellé, montantEpargnePeriode pour la prise en compte comme épargne côté
-    // sortie, et creerMiroirVirement pour l'écriture miroir créée automatiquement sur le compte.
-    if(state.comptes.length>0){
-      var libelleGroupe = type==='sortie' ? 'Virement vers un compte d\'épargne' : 'Virement depuis un compte d\'épargne';
-      html += '<optgroup label="'+libelleGroupe+'">' +
-        triAlpha(state.comptes).map(function(c){ return '<option value="'+c.id+'">'+escapeHtml(c.nom)+'</option>'; }).join('') +
-      '</optgroup>';
-    }
-    select.innerHTML = html;
+    select.innerHTML = cats.map(function(c){ return '<option value="'+c.id+'">'+escapeHtml(c.nom)+'</option>'; }).join('');
   }
   function ouvrirModal(transactionId){
     var modal = document.getElementById('modal-transaction');
@@ -2117,6 +2267,10 @@
     document.getElementById('input-date').value = dateLocaleISO();
     document.getElementById('input-recurrence').value = 'aucune';
     document.getElementById('input-type-paiement').value = '';
+    remplirComptesVirement();
+    document.getElementById('input-compte-virement').value = '';
+    document.getElementById('input-miroir-depuis').value = '';
+    document.getElementById('input-est-recurrent-existant').value = '';
     document.querySelectorAll('.segment-type button').forEach(function(b){ b.classList.remove('actif'); });
     remplirComptesCible();
     var selectCompte = document.getElementById('input-compte-cible');
@@ -2141,6 +2295,9 @@
       document.getElementById('input-montant').value = String(t.montant).replace('.', ',');
       if(!compteCibleId) document.getElementById('input-categorie').value = t.categorie;
       document.getElementById('input-type-paiement').value = t.typePaiement || '';
+      document.getElementById('input-compte-virement').value = t.compteVirement || '';
+      document.getElementById('input-miroir-depuis').value = t.miroirDepuis || '';
+      document.getElementById('input-est-recurrent-existant').value = t.recurrenceId ? '1' : '';
       document.getElementById('input-description').value = t.description || '';
       document.getElementById('input-date').value = t.date;
       document.getElementById('btn-supprimer-transaction').style.display = 'block';
@@ -2151,6 +2308,11 @@
     } else {
       document.getElementById('titre-modal').textContent = 'Ajouter un mouvement';
     }
+    // Type de paiement (et donc Compte d'épargne éventuel) n'est fixé à sa valeur définitive que
+    // juste au-dessus : la visibilité du sous-champ ne peut être évaluée correctement qu'ici, une
+    // fois toutes les valeurs posées (l'appel plus haut, via appliquerVisibiliteCompteCible, se
+    // basait encore sur la réinitialisation à vide du début de fonction).
+    appliquerVisibiliteCompteVirement();
     modal.classList.add('modal--ouvert');
   }
   function fermerModal(){
@@ -2177,6 +2339,9 @@
   document.getElementById('input-compte-cible').addEventListener('change', function(){
     appliquerVisibiliteCompteCible(this.value, null);
   });
+  document.getElementById('input-type-paiement').addEventListener('change', appliquerVisibiliteCompteVirement);
+  document.getElementById('input-compte-virement').addEventListener('change', appliquerVisibiliteCompteVirement);
+  document.getElementById('input-recurrence').addEventListener('change', appliquerVisibiliteCompteVirement);
   document.querySelectorAll('.segment-type button').forEach(function(btn){
     btn.addEventListener('click', function(){
       document.querySelectorAll('.segment-type button').forEach(function(b){ b.classList.remove('actif'); });
@@ -2195,6 +2360,8 @@
     var description = document.getElementById('input-description').value.trim();
     var date = document.getElementById('input-date').value || dateLocaleISO();
     var typePaiement = document.getElementById('input-type-paiement').value;
+    var compteVirementChoisi = typePaiement==='virement' ? document.getElementById('input-compte-virement').value : '';
+    var miroirDepuisChoisi = document.getElementById('input-miroir-depuis').value;
     var selectCompte = document.getElementById('input-compte-cible');
     var compteCible = selectCompte.disabled ? document.getElementById('input-compte-source').value : selectCompte.value;
 
@@ -2222,7 +2389,7 @@
       var t = state.transactions.find(function(x){return x.id===id;});
       if(t){
         var categoriePrecedente = t.categorie;
-        t.type=type; t.montant=montant; t.categorie=categorie; t.description=description; t.date=date; t.typePaiement=typePaiement;
+        t.type=type; t.montant=montant; t.categorie=categorie; t.description=description; t.date=date; t.typePaiement=typePaiement; t.compteVirement=compteVirementChoisi; t.miroirDepuis=miroirDepuisChoisi;
         // Une série récurrente représente une seule et même charge/recette dans le temps : si sa
         // catégorie est corrigée sur une occurrence (ex. reclasser un abonnement mal catégorisé),
         // toutes les autres occurrences de la série (passées et futures, même recurrenceId) doivent
@@ -2233,10 +2400,10 @@
           });
         }
         // Répercute sur l'écriture miroir existante (montant/date/sens), la recrée si le virement
-        // change de compte, la retire si ce n'est plus un virement, ou en crée une si la catégorie
-        // vient tout juste de devenir un virement de compte (édition manuelle : pas de restriction
-        // de date ici, contrairement à la génération automatique d'une série récurrente).
-        var compteVirementApres = getCompte(categorie);
+        // change de compte, la retire si ce n'est plus un virement, ou en crée une si le compte
+        // d'épargne vient tout juste d'être choisi (édition manuelle : pas de restriction de date
+        // ici, contrairement à la génération automatique d'une série récurrente).
+        var compteVirementApres = getCompte(compteVirementChoisi);
         if(t.miroirId){
           var lienMiroir = trouverMiroir(t.miroirId, t.id);
           if(lienMiroir && lienMiroir.source==='compte' && compteVirementApres && lienMiroir.compte.id===compteVirementApres.id){
@@ -2263,11 +2430,6 @@
           t.recurrenceFrequence = frequenceConv;
           var occConv = genererOccurrencesRecurrentes(t, frequenceConv);
           state.transactions = state.transactions.concat(occConv);
-          // t lui-même est déjà géré par le bloc miroir ci-dessus ; seules les occurrences
-          // nouvellement générées par la conversion restent à traiter, avec la même règle de départ.
-          occConv.forEach(function(occ){
-            if(occ.date >= DATE_DEBUT_MIROIR_VIREMENTS_RECURRENTS) creerMiroirVirement(occ);
-          });
           var aujourdhuiConv = dateLocaleISO();
           var nbPassees = occConv.filter(function(o){ return o.date <= aujourdhuiConv; }).length;
           var nbFutures = occConv.length - nbPassees;
@@ -2278,10 +2440,21 @@
         } else {
           toast('Mouvement modifié');
         }
+        // Une série récurrente doit avoir un seuil « Miroir à partir de » cohérent sur toute sa
+        // longueur : propage ce champ à toutes ses occurrences (existantes ou tout juste générées
+        // par la conversion ci-dessus) et recrée/retire les écritures miroir en conséquence. Ne
+        // s'applique que si un compte d'épargne est effectivement choisi ici — retirer le virement
+        // d'UNE occurrence ne doit pas faire disparaître le virement de toute la série.
+        if(t.recurrenceId && compteVirementApres){
+          state.transactions.forEach(function(autre){
+            if(autre.recurrenceId===t.recurrenceId) autre.miroirDepuis = miroirDepuisChoisi;
+          });
+          resynchroniserMiroirsSerie(t.recurrenceId, miroirDepuisChoisi, compteVirementChoisi);
+        }
       }
     } else {
       var frequence = document.getElementById('input-recurrence').value;
-      var nouvelle = {id: genId(), type:type, montant:montant, categorie:categorie, description:description, date:date, typePaiement:typePaiement};
+      var nouvelle = {id: genId(), type:type, montant:montant, categorie:categorie, description:description, date:date, typePaiement:typePaiement, compteVirement:compteVirementChoisi, miroirDepuis:miroirDepuisChoisi};
       if(frequence !== 'aucune'){
         nouvelle.recurrent = true;
         nouvelle.recurrenceId = nouvelle.id;
@@ -2289,10 +2462,11 @@
         var occurrences = genererOccurrencesRecurrentes(nouvelle, frequence);
         state.transactions = state.transactions.concat(occurrences);
         state.transactions.push(nouvelle);
-        // Miroir sur le compte d'épargne pour une série récurrente : seulement à partir du 1er
-        // septembre 2026 (voir DATE_DEBUT_MIROIR_VIREMENTS_RECURRENTS), jamais avant.
+        // Miroir sur le compte d'épargne pour une série récurrente : seuil choisi dans le formulaire
+        // (Miroir à partir de), ou tout refléter dès le début si laissé vide.
+        var seuilMiroirCreation = miroirDepuisChoisi || date;
         occurrences.concat([nouvelle]).forEach(function(occ){
-          if(occ.date >= DATE_DEBUT_MIROIR_VIREMENTS_RECURRENTS) creerMiroirVirement(occ);
+          if(occ.date >= seuilMiroirCreation) creerMiroirVirement(occ);
         });
         var suffixe = frequence==='annuel' ? 'reconduite l\'an prochain' : 'jusqu\'à fin d\'année';
         toast(occurrences.length>0 ? ('Mouvement ajouté + '+occurrences.length+' échéance(s) '+suffixe) : 'Mouvement ajouté');
@@ -2353,9 +2527,12 @@
     document.getElementById('btn-supprimer-transaction').style.display = 'none';
     document.getElementById('btn-dupliquer-transaction').style.display = 'none';
     document.getElementById('input-recurrence').value = 'aucune';
+    document.getElementById('input-est-recurrent-existant').value = '';
+    document.getElementById('input-miroir-depuis').value = '';
     var selectCompteDup = document.getElementById('input-compte-cible');
     selectCompteDup.disabled = false;
     document.getElementById('ligne-champ-recurrent').style.display = selectCompteDup.value ? 'none' : 'flex';
+    appliquerVisibiliteCompteVirement();
     toast('Duplicata prêt — modifiez si besoin puis enregistrez');
   });
   document.getElementById('barre-periode').addEventListener('click', function(e){
@@ -2382,9 +2559,10 @@
     setTimeout(demarrer, 12000); // filet de secours : l'appli s'ouvre de toute façon après 12s max
     chargerIdentifiantsCloud(); // indépendant, ne doit jamais retarder l'ouverture de l'appli
     chargerDonnees().then(function(){
+      var nbMigrees = migrerVirementsVersNouveauChamp();
       var nbSupprimees = dedupliquerRecurrences();
       var nbAjoutees = synchroniserRecurrences();
-      if(nbSupprimees>0 || nbAjoutees>0) sauvegarder();
+      if(nbMigrees>0 || nbSupprimees>0 || nbAjoutees>0) sauvegarder();
       demarrer();
     }).catch(function(e){
       console.error('Erreur au chargement', e);
