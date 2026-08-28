@@ -441,6 +441,7 @@
   var VUES_AVEC_PERIODE = ['dashboard','repartition','optimisation'];
   var anneeArchiveOuverte = null; // état d'affichage (repliable) du détail d'une archive dans Réglages
   var compteOuvertId = null; // état d'affichage (repliable) du détail d'un compte d'épargne dans Réglages
+  var doublonsOuvert = false; // état d'affichage (repliable) du panneau de vérification des doublons dans Réglages
 
   // ---------- Utilitaires ----------
   function genId(){ return 'id-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2,8); }
@@ -708,6 +709,25 @@
       return a.date < b.date ? -1 : 1;
     });
   }
+  // Projette le solde du compte Courant à travers les échéances déjà saisies (récurrentes ou
+  // ponctuelles, datées dans le futur — voir echeancesAVenir, déjà triée chronologiquement) pour
+  // détecter si et quand il passerait à découvert. Ne porte que sur le compte Courant
+  // (state.transactions) : un compte d'épargne à découvert n'a pas la même urgence, et n'est de
+  // toute façon pas un cas d'usage prévu pour ces comptes. Retourne null si aucun découvert prévu
+  // sur l'horizon des échéances déjà saisies (qui s'arrête à décembre de l'année en cours pour les
+  // séries récurrentes — voir genererOccurrencesRecurrentes).
+  function projeterDecouvert(){
+    var solde = soldeGlobal();
+    var echeances = echeancesAVenir();
+    for(var i=0;i<echeances.length;i++){
+      var t = echeances[i];
+      solde += (t.type==='entree' ? t.montant : -t.montant);
+      if(solde < 0){
+        return {date: t.date, solde: solde, declencheur: t};
+      }
+    }
+    return null;
+  }
   // ---------- Objectifs en direct (mode Auto) ----------
   // % réel de dépense par catégorie, calculé sur l'année civile en cours pour rester une référence
   // stable indépendante de l'onglet/période consultés (sinon les objectifs « clignoteraient » en
@@ -769,11 +789,24 @@
     });
   }
   function planOptimisation(){
-    // Les virements vers un compte d'épargne sont exclus du plan d'optimisation : ils sont déjà
-    // valorisés globalement par la carte « Taux d'épargne » (montantEpargnePeriode les compte),
-    // et une carte individuelle avec un objectif à 0% n'aurait pas de sens ici.
-    return repartitionParCategorie().filter(function(c){ return !c.estCompte; }).map(function(c){
-      return {id:c.id, nom:c.nom, couleur:c.couleur, objectif:c.objectif, montant:c.montant, pct:c.pct, ecart:c.pct - c.objectif};
+    var rep = repartitionParCategorie();
+    var totalSorties = rep.reduce(function(a,c){ return a+c.montant; }, 0);
+    // Le montant qui alimente la carte « Épargne » regroupe la catégorie « Épargne » brute ET tous
+    // les virements vers un compte d'épargne (estCompte:true) — cohérent avec montantEpargnePeriode
+    // utilisé par la carte « Taux d'épargne » juste au-dessus. Sans ce regroupement, un virement vers
+    // un compte d'épargne (n'ayant pas sa propre carte ici — voir le filtre estCompte plus bas) ne
+    // remontait nulle part dans le plan, laissant la carte « Épargne » à 0% de façon trompeuse alors
+    // que l'utilisateur épargne bel et bien, juste via ce mécanisme plutôt que la catégorie brute.
+    var montantEpargneTotal = rep.filter(function(c){ return c.id==='epargne' || c.estCompte; })
+      .reduce(function(a,c){ return a+c.montant; }, 0);
+    // Les virements vers un compte d'épargne sont exclus des cartes individuelles du plan : leur
+    // montant est déjà entièrement reflété dans la carte « Épargne » ci-dessus, et une carte séparée
+    // par compte avec un objectif à 0% n'aurait pas de sens ici (elle garde sa place dans Répartition,
+    // où repartitionParCategorie les affiche telles quelles).
+    return rep.filter(function(c){ return !c.estCompte; }).map(function(c){
+      var montant = c.id==='epargne' ? montantEpargneTotal : c.montant;
+      var pct = totalSorties>0 ? (montant/totalSorties*100) : 0;
+      return {id:c.id, nom:c.nom, couleur:c.couleur, objectif:c.objectif, montant:montant, pct:pct, ecart:pct - c.objectif};
     }).sort(function(a,b){ return b.ecart - a.ecart; });
   }
   // Les sorties catégorisées « Épargne » sont de l'argent mis de côté, pas dépensé : on les retire
@@ -1114,6 +1147,14 @@
     var aujourdhuiRecents = dateLocaleISO();
     var recents = state.transactions.filter(function(t){ return t.date <= aujourdhuiRecents; }).sort(trierParDateDesc).slice(0,5);
     var echeances = echeancesAVenir();
+    var decouvert = projeterDecouvert();
+    var blocDecouvert = decouvert ? (
+      '<div class="carte-epargne carte-epargne--attention">' +
+        '<p class="carte-stat-label">⚠ Découvert prévu</p>' +
+        '<p style="margin:2px 0;font-weight:600">Le '+formatDateAffichage(decouvert.date)+', votre solde passerait à '+formatMontant(decouvert.solde)+'</p>' +
+        '<p class="aide-texte" style="margin:0">Après « '+escapeHtml(decouvert.declencheur.description || (decouvert.declencheur.type==='entree'?'Entrée':'Sortie'))+' » ('+formatMontant(decouvert.declencheur.montant)+'), selon les échéances déjà saisies.</p>' +
+      '</div>'
+    ) : '';
     el.innerHTML =
       '<div class="hero-solde">' +
         '<p class="eyebrow">Solde du grand livre</p>' +
@@ -1121,6 +1162,7 @@
         '<p class="hero-solde-date">au '+formatDateAffichage(dateLocaleISO())+'</p>' +
         '<div class="double-regle"></div>' +
       '</div>' +
+      blocDecouvert +
       '<div class="grille-stats">' +
         '<div class="carte-stat"><p class="carte-stat-label">Entrées · '+libellePeriode()+'</p><p class="carte-stat-valeur ink-credit">+'+formatMontant(t.entrees)+'</p></div>' +
         '<div class="carte-stat"><p class="carte-stat-label">Sorties · '+libellePeriode()+'</p><p class="carte-stat-valeur ink-debit">-'+formatMontant(t.sorties)+'</p></div>' +
@@ -1439,6 +1481,22 @@
     renderReglages();
     toast('Catégorie « '+supprimee.nom+' » restaurée');
   }
+  // Supprime un mouvement identifié comme doublon ponctuel (voir trouverDoublonsPonctuels), avec
+  // confirmation explicite comme demandé — une coïncidence réelle entre deux mouvements distincts
+  // reste possible, la suppression doit donc toujours être un choix délibéré, jamais automatique.
+  // Cascade sur l'écriture miroir liée s'il s'agit d'un virement vers/depuis un compte d'épargne,
+  // pour ne jamais laisser d'orpheline.
+  function supprimerDoublonPonctuel(id){
+    var t = state.transactions.find(function(x){ return x.id===id; });
+    if(!t) return;
+    if(!confirm('Supprimer ce mouvement ?')) return;
+    if(t.miroirId) supprimerMiroirLie(t);
+    state.transactions = state.transactions.filter(function(x){ return x.id!==id; });
+    sauvegarder();
+    renderReglages();
+    render();
+    toast('Mouvement supprimé');
+  }
   function renderBlocArchives(){
     var aArchiver = anneesDisponiblesPourArchivage();
     var archives = state.archives.slice().sort(function(a,b){ return b.annee - a.annee; });
@@ -1525,6 +1583,57 @@
     '</div>';
     return html;
   }
+  // Regroupe les mouvements PONCTUELS (hors séries récurrentes, déjà nettoyées automatiquement au
+  // démarrage par dedupliquerRecurrences) partageant exactement la même signature (date+type+
+  // montant+libellé, voir signatureTransaction — la même utilisée pour détecter les doublons à
+  // l'import CSV). Ne retourne que les groupes de 2 mouvements ou plus : une vraie coïncidence
+  // (ex. plusieurs prélèvements identiques le même jour, réellement rencontrée dans un relevé)
+  // peut y apparaître à tort — d'où la vérification manuelle avant suppression plutôt qu'un
+  // nettoyage automatique comme pour les récurrents, où la même date+même série est toujours une
+  // vraie erreur.
+  function trouverDoublonsPonctuels(){
+    var groupes = {};
+    state.transactions.forEach(function(t){
+      if(t.recurrenceId) return;
+      var cle = signatureTransaction(t);
+      (groupes[cle] = groupes[cle] || []).push(t);
+    });
+    return Object.keys(groupes).map(function(cle){ return groupes[cle]; }).filter(function(g){ return g.length>1; });
+  }
+  function renderBlocDoublons(){
+    var html = '<div class="bloc-reglage"><h3 class="sous-titre">Vérifier les doublons</h3>' +
+      '<p class="aide-texte">Recherche les mouvements ponctuels qui partagent exactement la même date, le même montant et le même libellé. Une coïncidence réelle (ex. plusieurs prélèvements identiques le même jour) peut apparaître : vérifiez avant de supprimer.</p>' +
+      '<button class="bouton-secondaire" type="button" id="btn-chercher-doublons">'+(doublonsOuvert ? 'Masquer' : 'Rechercher les doublons')+'</button>';
+    if(doublonsOuvert){
+      var groupes = trouverDoublonsPonctuels();
+      if(groupes.length===0){
+        html += '<p class="aide-texte" style="margin-top:10px">Aucun doublon trouvé.</p>';
+      } else {
+        var totalExtra = groupes.reduce(function(a,g){ return a+(g.length-1); }, 0);
+        html += '<p class="aide-texte" style="margin-top:10px">'+groupes.length+' groupe(s) trouvé(s), '+totalExtra+' suppression(s) possible(s) au total.</p>';
+        html += '<div class="liste-archives">' + groupes.map(function(g){
+          var t0 = g[0];
+          var signe = t0.type==='entree' ? '+' : '-';
+          var classe = t0.type==='entree' ? 'ink-credit' : 'ink-debit';
+          return '<div class="ligne-archive ligne-archive--archivee">' +
+            '<div class="ligne-archive-entete" style="cursor:default">' +
+              '<span class="ligne-archive-annee">'+escapeHtml(t0.description || '(sans libellé)')+' · '+formatDateAffichage(t0.date)+'</span>' +
+              '<span class="ligne-archive-info '+classe+'">'+g.length+' × '+signe+formatMontant(t0.montant)+'</span>' +
+            '</div>' +
+            '<div class="detail-compte">' + g.map(function(t){
+              return '<div class="ligne-mvt ligne-mvt--compte">' +
+                '<span class="ligne-mvt-corps"><span class="ligne-mvt-titre">'+escapeHtml(t.description || '—')+'</span><span class="ligne-mvt-sous">'+formatDateAffichage(t.date)+'</span></span>' +
+                '<span class="ligne-mvt-montant '+classe+'">'+signe+formatMontant(t.montant)+'</span>' +
+                '<button type="button" class="bouton-supprimer-cat" data-action="suppr-doublon" data-id="'+t.id+'" title="Supprimer ce mouvement">✕</button>' +
+              '</div>';
+            }).join('') + '</div>' +
+          '</div>';
+        }).join('') + '</div>';
+      }
+    }
+    html += '</div>';
+    return html;
+  }
   function renderReglages(){
     var el = document.getElementById('vue-reglages');
     var modeAuto = !!state.objectifsAutoSync;
@@ -1556,6 +1665,7 @@
         '<button class="bouton-secondaire" type="button" id="btn-ajouter-cat-entree">+ Ajouter une source</button>' +
       '</div>' +
       renderBlocCategoriesSupprimees() +
+      renderBlocDoublons() +
       '<div class="bloc-reglage"><h3 class="sous-titre">Données</h3>' +
         '<button class="bouton-secondaire" type="button" id="btn-import-releve">Importer un relevé bancaire (CSV)</button>' +
         '<input type="file" id="input-import-csv" accept=".csv,text/csv" style="display:none">' +
@@ -1701,6 +1811,13 @@
     document.getElementById('btn-nouveau-compte-manuel').addEventListener('click', creerCompteManuel);
     el.querySelectorAll('[data-action="restaurer-categorie"]').forEach(function(btn){
       btn.addEventListener('click', function(){ restaurerCategorie(btn.dataset.id); });
+    });
+    document.getElementById('btn-chercher-doublons').addEventListener('click', function(){
+      doublonsOuvert = !doublonsOuvert;
+      renderReglages();
+    });
+    el.querySelectorAll('[data-action="suppr-doublon"]').forEach(function(btn){
+      btn.addEventListener('click', function(){ supprimerDoublonPonctuel(btn.dataset.id); });
     });
   }
 
@@ -2615,6 +2732,8 @@
       var nbAjoutees = synchroniserRecurrences();
       if(nbMigrees>0 || nbSupprimees>0 || nbAjoutees>0) sauvegarder();
       demarrer();
+      var decouvert = projeterDecouvert();
+      if(decouvert) toast('⚠ Découvert prévu le '+formatDateAffichage(decouvert.date)+' ('+formatMontant(decouvert.solde)+')');
     }).catch(function(e){
       console.error('Erreur au chargement', e);
       demarrer();
