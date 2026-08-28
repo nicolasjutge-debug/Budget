@@ -352,6 +352,9 @@
         <select id="input-compte-virement" class="input-select"></select>
         <span class="aide-texte" id="aide-compte-virement" style="margin:0">Crédite ce compte du même montant (sortie du Courant).</span>
       </label>
+      <div class="etiquette-champ" id="ligne-champ-virement-courant" style="display:none">Virement avec Courant
+        <span class="aide-texte" id="aide-virement-courant" style="margin:0">Crédite Courant du même montant (l'argent part de ce compte vers Courant).</span>
+      </div>
       <label class="etiquette-champ" id="ligne-champ-miroir-depuis" style="display:none">Miroir à partir de
         <input type="date" id="input-miroir-depuis" class="input-texte">
         <span class="aide-texte" style="margin:0">Les échéances de la série avant cette date restent étiquetées comme virement mais ne créditent/débitent pas le compte (déjà couvertes par un import CSV, par exemple). Laisser vide pour refléter toute la série dès le début.</span>
@@ -464,6 +467,15 @@
   function dateLocaleISO(d){
     d = d || new Date();
     return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+  }
+  // Nombre de jours calendaires entre aujourd'hui et une date (YYYY-MM-DD) donnée — comparaison à
+  // minuit des deux dates (pas d'écart en heures/minutes). Utilisé pour ne signaler un découvert
+  // prévu qu'à l'approche de l'échéance (voir renderDashboard) plutôt que dès sa détection, parfois
+  // des mois à l'avance et donc peu actionnable tant que l'échéance n'est pas proche.
+  function joursAvant(dateStr){
+    var aujourdhui = new Date(dateLocaleISO()+'T00:00:00');
+    var cible = new Date(dateStr+'T00:00:00');
+    return Math.round((cible - aujourdhui) / 86400000);
   }
   function libellePeriode(){
     if(state.periode==='mois') return 'ce mois-ci';
@@ -1148,7 +1160,12 @@
     var recents = state.transactions.filter(function(t){ return t.date <= aujourdhuiRecents; }).sort(trierParDateDesc).slice(0,5);
     var echeances = echeancesAVenir();
     var decouvert = projeterDecouvert();
-    var blocDecouvert = decouvert ? (
+    // Le découvert n'est signalé qu'à partir d'une semaine avant l'échéance qui le déclenche : détecté
+    // parfois des mois à l'avance (ex. une charge annuelle en décembre), il resterait sinon affiché en
+    // permanence sans être vraiment actionnable — l'alerte gagne en pertinence en se rapprochant de la
+    // date réelle (voir aussi le toast de démarrage équivalent dans init()).
+    var decouvertProche = decouvert && joursAvant(decouvert.date) <= 7;
+    var blocDecouvert = decouvertProche ? (
       '<div class="carte-epargne carte-epargne--attention">' +
         '<p class="carte-stat-label">⚠ Découvert prévu</p>' +
         '<p style="margin:2px 0;font-weight:600">Le '+formatDateAffichage(decouvert.date)+', votre solde passerait à '+formatMontant(decouvert.solde)+'</p>' +
@@ -1532,7 +1549,7 @@
   }
   function renderBlocComptes(){
     var html = '<div class="bloc-reglage"><h3 class="sous-titre">Comptes d\'épargne</h3>' +
-      '<p class="aide-texte">Créez un compte d\'épargne manuellement ou en important son relevé CSV : il fonctionne comme son propre grand livre (solde, historique). Pour un virement vers ou depuis ce compte (ponctuel ou récurrent, dans les deux sens), choisissez Type de paiement = Virement dans le formulaire d\'un mouvement Courant — le sens Sortie/Entrée déjà sélectionné détermine si ce compte est crédité ou débité.</p>';
+      '<p class="aide-texte">Créez un compte d\'épargne manuellement ou en important son relevé CSV : il fonctionne comme son propre grand livre (solde, historique). Pour un virement vers ou depuis ce compte (ponctuel ou récurrent, dans les deux sens), choisissez Type de paiement = Virement — dans le formulaire d\'un mouvement Courant, ou directement dans celui de ce compte (Courant est alors la cible implicite).</p>';
     if(state.comptes.length===0){
       html += '<p class="aide-texte">Aucun compte d\'épargne pour le moment.</p>';
     } else {
@@ -2376,48 +2393,93 @@
   }
   // Cherche une transaction par id d'abord dans le grand livre principal, puis dans chaque compte
   // d'épargne — retourne aussi l'id du compte source ("" pour le grand livre) pour savoir où
-  // enregistrer/supprimer ensuite.
+  // enregistrer/supprimer ensuite. Un mouvement de compte d'épargne portant un miroirId est le
+  // REFLET d'un virement dont l'écriture source (catégorie, récurrence, seuil « Miroir à partir de »)
+  // vit côté Courant (voir creerMiroirVirement) : on résout alors directement vers cette écriture
+  // source, jamais vers son reflet, pour ne jamais les modifier indépendamment l'une de l'autre
+  // (montant/date désynchronisés entre les deux côtés sinon). La suppression, elle, cascade déjà
+  // correctement des deux côtés via supprimerMiroirLie quel que soit celui qu'on supprime — cette
+  // résolution ne concerne que l'ÉDITION.
   function trouverTransactionEtSource(id){
     if(!id) return null;
     var t = state.transactions.find(function(x){return x.id===id;});
     if(t) return {transaction:t, compteId:''};
     for(var i=0;i<state.comptes.length;i++){
       var trouve = (state.comptes[i].transactions||[]).find(function(x){return x.id===id;});
-      if(trouve) return {transaction:trouve, compteId:state.comptes[i].id};
+      if(trouve){
+        if(trouve.miroirId){
+          var source = trouverMiroir(trouve.miroirId, trouve.id);
+          if(source && source.source==='courant') return {transaction:source.transaction, compteId:''};
+        }
+        return {transaction:trouve, compteId:state.comptes[i].id};
+      }
     }
     return null;
   }
-  // Un mouvement de compte d'épargne n'a ni catégorie ni récurrence (concepts propres au budget du
-  // grand livre) : on masque ces champs quand un compte d'épargne est ciblé.
-  function appliquerVisibiliteCompteCible(compteCibleId, transactionEditee){
+  // Un mouvement de compte d'épargne n'a jamais de catégorie (concept propre au budget du grand
+  // livre) : on masque ce champ quand un compte d'épargne est ciblé. La récurrence, elle, reste
+  // possible dans ce cas précis — voir appliquerVisibiliteCompteVirement, qui gère toute la logique
+  // (elle dépend aussi du Type de paiement, pas seulement du compte ciblé).
+  function appliquerVisibiliteCompteCible(compteCibleId){
     var estCompte = !!compteCibleId;
     document.getElementById('ligne-champ-categorie').style.display = estCompte ? 'none' : 'flex';
-    document.getElementById('ligne-champ-recurrent').style.display = (estCompte || (transactionEditee && transactionEditee.recurrenceId)) ? 'none' : 'flex';
     appliquerVisibiliteCompteVirement();
   }
-  // Le sous-champ « Compte d'épargne » n'a de sens que pour un mouvement du grand livre (pas un
-  // mouvement déjà interne à un compte) ET quand Type de paiement = Virement est choisi. Le sens
-  // (créditer ou débiter ce compte) suit le segment Sortie/Entrée déjà sélectionné plus haut dans le
-  // formulaire — le texte d'aide le rend explicite pour qu'un virement récurrent DEPUIS un compte
-  // d'épargne VERS Courant (Entrée + Virement + compte + récurrence) soit aussi facile à trouver que
-  // le sens inverse.
+  // Un virement entre Courant et un compte d'épargne peut être initié des deux côtés du formulaire :
+  // - depuis Courant (Compte = Courant) : Type de paiement = Virement fait apparaître un sélecteur
+  //   pour choisir LE compte d'épargne concerné (plusieurs comptes possibles) — champ
+  //   ligne-champ-compte-virement, inchangé. Le sens (créditer/débiter ce compte) suit le segment
+  //   Sortie/Entrée déjà sélectionné plus haut, pour qu'un virement récurrent DEPUIS un compte
+  //   d'épargne VERS Courant (Entrée + Virement + compte + récurrence) soit aussi facile à trouver
+  //   que le sens inverse.
+  // - depuis un compte d'épargne (Compte = ce compte) : Type de paiement = Virement suffit à lui
+  //   seul, Courant étant le seul autre grand livre possible — pas de sélecteur, juste une
+  //   confirmation (ligne-champ-virement-courant). Uniquement proposé à la CRÉATION d'un nouveau
+  //   mouvement (pas en édition) : un virement déjà existant est toujours résolu vers son écriture
+  //   source côté Courant avant l'ouverture du formulaire (voir trouverTransactionEtSource), donc ce
+  //   cas ne se présente jamais en édition — la restriction évite seulement qu'éditer un mouvement de
+  //   compte ordinaire (import CSV, saisie manuelle) et y choisir « Virement » ne laisse croire à une
+  //   conversion possible depuis ce raccourci, alors que la soumission ne la traite pas dans ce cas.
+  // Dans les deux sens, le mouvement réel est enregistré côté Courant à la soumission (voir plus
+  // bas) : récurrence et « Miroir à partir de » ont donc un sens dans les deux cas, pas seulement le
+  // premier.
   function appliquerVisibiliteCompteVirement(){
     var estCompteCible = !!document.getElementById('input-compte-cible').value;
     var estVirement = document.getElementById('input-type-paiement').value === 'virement';
-    var afficherCompte = !estCompteCible && estVirement && state.comptes.length>0;
-    document.getElementById('ligne-champ-compte-virement').style.display = afficherCompte ? 'flex' : 'none';
-    if(afficherCompte){
-      var typeActuel = document.getElementById('champ-type-actif').value;
+    var typeActuel = document.getElementById('champ-type-actif').value;
+    var creation = !document.getElementById('input-id-transaction').value;
+    var virementDepuisCompte = estCompteCible && estVirement && creation;
+
+    var afficherSelecteur = !estCompteCible && estVirement && state.comptes.length>0;
+    document.getElementById('ligne-champ-compte-virement').style.display = afficherSelecteur ? 'flex' : 'none';
+    if(afficherSelecteur){
       document.getElementById('aide-compte-virement').textContent = typeActuel==='entree'
         ? 'Débite ce compte du même montant (l\'argent part de ce compte vers Courant).'
         : 'Crédite ce compte du même montant (l\'argent part de Courant vers ce compte).';
     }
+
+    document.getElementById('ligne-champ-virement-courant').style.display = virementDepuisCompte ? 'flex' : 'none';
+    if(virementDepuisCompte){
+      document.getElementById('aide-virement-courant').textContent = typeActuel==='sortie'
+        ? 'Crédite Courant du même montant (l\'argent part de ce compte vers Courant).'
+        : 'Débite Courant du même montant (l\'argent part de Courant vers ce compte).';
+    }
+
+    // Récurrence : masquée pour un mouvement de compte d'épargne qui n'est pas (ou ne peut pas être,
+    // voir virementDepuisCompte) un virement avec Courant — une entrée/sortie manuelle propre au
+    // compte n'a pas de mécanisme de série dédié. Masquée aussi si le mouvement édité fait déjà
+    // partie d'une série (input-est-recurrent-existant, posé à l'ouverture du modal) : on ne
+    // convertit pas deux fois.
+    var dejaRecurrent = document.getElementById('input-est-recurrent-existant').value === '1';
+    var recurrencePossible = !estCompteCible || virementDepuisCompte;
+    document.getElementById('ligne-champ-recurrent').style.display = (recurrencePossible && !dejaRecurrent) ? 'flex' : 'none';
+
     // « Miroir à partir de » n'a de sens que pour une SÉRIE récurrente (un virement ponctuel se
     // reflète toujours immédiatement, sans possibilité de décalage) et un compte effectivement
-    // choisi (pas "Aucun (virement classique)").
-    var compteChoisi = !!document.getElementById('input-compte-virement').value;
-    var estRecurrent = document.getElementById('input-recurrence').value !== 'aucune' || document.getElementById('input-est-recurrent-existant').value==='1';
-    document.getElementById('ligne-champ-miroir-depuis').style.display = (afficherCompte && compteChoisi && estRecurrent) ? 'flex' : 'none';
+    // impliqué (choisi dans le sélecteur côté Courant, ou implicite côté compte).
+    var compteImplique = afficherSelecteur ? !!document.getElementById('input-compte-virement').value : virementDepuisCompte;
+    var estRecurrent = document.getElementById('input-recurrence').value !== 'aucune' || dejaRecurrent;
+    document.getElementById('ligne-champ-miroir-depuis').style.display = (estVirement && compteImplique && estRecurrent) ? 'flex' : 'none';
   }
   function remplirCategories(type){
     var select = document.getElementById('input-categorie');
@@ -2448,7 +2510,7 @@
     var compteCibleId = trouve ? trouve.compteId : '';
     selectCompte.value = compteCibleId;
     document.getElementById('input-compte-source').value = compteCibleId;
-    appliquerVisibiliteCompteCible(compteCibleId, t);
+    appliquerVisibiliteCompteCible(compteCibleId);
 
     var typeInitial = t ? t.type : 'sortie';
     var boutonType = document.querySelector('.segment-type button[data-type="'+typeInitial+'"]');
@@ -2504,7 +2566,7 @@
   document.getElementById('btn-fermer-modal').addEventListener('click', fermerModal);
   document.getElementById('overlay-modal').addEventListener('click', fermerModal);
   document.getElementById('input-compte-cible').addEventListener('change', function(){
-    appliquerVisibiliteCompteCible(this.value, null);
+    appliquerVisibiliteCompteCible(this.value);
   });
   document.getElementById('input-type-paiement').addEventListener('change', appliquerVisibiliteCompteVirement);
   document.getElementById('input-compte-virement').addEventListener('change', appliquerVisibiliteCompteVirement);
@@ -2534,9 +2596,47 @@
     var compteCible = selectCompte.disabled ? document.getElementById('input-compte-source').value : selectCompte.value;
 
     if(compteCible){
-      // --- Mouvement d'un compte d'épargne : ni catégorie ni récurrence, propres au grand livre ---
       var compte = getCompte(compteCible);
       if(!compte){ toast('Compte introuvable'); return; }
+
+      if(!id && typePaiement==='virement'){
+        // Virement initié depuis le formulaire de CE compte : Courant est la cible implicite, seul
+        // autre grand livre possible (voir appliquerVisibiliteCompteVirement). On enregistre en
+        // réalité l'écriture côté Courant, avec compteVirement = ce compte — même moteur que pour un
+        // virement initié depuis le formulaire Courant (récurrence, miroir, seuil « Miroir à partir
+        // de »), pour ne jamais dupliquer cette logique. Le sens est inversé par rapport au segment
+        // Sortie/Entrée choisi ici, qui reste relatif à CE compte comme pour un mouvement ordinaire
+        // du compte (une Sortie ici = le compte diminue = une Entrée côté Courant, et inversement —
+        // voir l'aide-texte du champ juste au-dessus dans le formulaire).
+        var typeCourant = type==='sortie' ? 'entree' : 'sortie';
+        var nouvelleVir = {id:genId(), type:typeCourant, montant:montant, categorie:'', description:description, date:date, typePaiement:'virement', compteVirement:compteCible, miroirDepuis:miroirDepuisChoisi};
+        var frequenceVir = document.getElementById('input-recurrence').value;
+        if(frequenceVir !== 'aucune'){
+          nouvelleVir.recurrent = true;
+          nouvelleVir.recurrenceId = nouvelleVir.id;
+          nouvelleVir.recurrenceFrequence = frequenceVir;
+          var occVir = genererOccurrencesRecurrentes(nouvelleVir, frequenceVir);
+          state.transactions = state.transactions.concat(occVir);
+          state.transactions.push(nouvelleVir);
+          var seuilVir = miroirDepuisChoisi || date;
+          occVir.concat([nouvelleVir]).forEach(function(occ){
+            if(occ.date >= seuilVir) creerMiroirVirement(occ);
+          });
+          var suffixeVir = frequenceVir==='annuel' ? 'reconduite l\'an prochain' : 'jusqu\'à fin d\'année';
+          toast(occVir.length>0 ? ('Virement ajouté + '+occVir.length+' échéance(s) '+suffixeVir) : 'Virement ajouté');
+        } else {
+          state.transactions.push(nouvelleVir);
+          creerMiroirVirement(nouvelleVir);
+          toast('Virement ajouté');
+        }
+        fermerModal();
+        sauvegarder();
+        render();
+        return;
+      }
+
+      // --- Mouvement d'un compte d'épargne (hors virement à la création, voir ci-dessus) : ni
+      // catégorie ni récurrence, propres au grand livre ---
       if(id){
         var tCompte = (compte.transactions||[]).find(function(x){return x.id===id;});
         if(tCompte){ tCompte.type=type; tCompte.montant=montant; tCompte.description=description; tCompte.date=date; tCompte.typePaiement=typePaiement; }
@@ -2688,7 +2788,10 @@
     // (montant, catégorie, type de paiement, description, compte cible), mais sans id, sans lien de
     // récurrence ni de miroir — dupliquer une occurrence d'une série ne doit pas la lier à cette
     // série. La date est remise à aujourd'hui (cas d'usage le plus courant), modifiable avant
-    // d'enregistrer.
+    // d'enregistrer. Le compte cible reste éditable et sa visibilité (récurrence, virement avec
+    // Courant) est entièrement recalculée par appliquerVisibiliteCompteVirement juste en dessous :
+    // dupliquer un mouvement de compte d'épargne propose donc récurrence et virement exactement
+    // comme pour Courant, sans logique séparée à maintenir ici.
     document.getElementById('input-id-transaction').value = '';
     document.getElementById('input-date').value = dateLocaleISO();
     document.getElementById('titre-modal').textContent = 'Ajouter un mouvement';
@@ -2697,9 +2800,7 @@
     document.getElementById('input-recurrence').value = 'aucune';
     document.getElementById('input-est-recurrent-existant').value = '';
     document.getElementById('input-miroir-depuis').value = '';
-    var selectCompteDup = document.getElementById('input-compte-cible');
-    selectCompteDup.disabled = false;
-    document.getElementById('ligne-champ-recurrent').style.display = selectCompteDup.value ? 'none' : 'flex';
+    document.getElementById('input-compte-cible').disabled = false;
     appliquerVisibiliteCompteVirement();
     toast('Duplicata prêt — modifiez si besoin puis enregistrez');
   });
@@ -2733,7 +2834,9 @@
       if(nbMigrees>0 || nbSupprimees>0 || nbAjoutees>0) sauvegarder();
       demarrer();
       var decouvert = projeterDecouvert();
-      if(decouvert) toast('⚠ Découvert prévu le '+formatDateAffichage(decouvert.date)+' ('+formatMontant(decouvert.solde)+')');
+      // Même seuil d'une semaine que sur le Dashboard (voir renderDashboard) : évite un toast au
+      // lancement pour une échéance encore lointaine et pas actionnable dans l'immédiat.
+      if(decouvert && joursAvant(decouvert.date) <= 7) toast('⚠ Découvert prévu le '+formatDateAffichage(decouvert.date)+' ('+formatMontant(decouvert.solde)+')');
     }).catch(function(e){
       console.error('Erreur au chargement', e);
       demarrer();
