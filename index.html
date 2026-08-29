@@ -1173,8 +1173,8 @@
     var decouvertProche = decouvert && joursAvant(decouvert.date) <= SEUIL_JOURS_ALERTE_DECOUVERT;
     var blocDecouvert = decouvertProche ? (
       '<div class="carte-epargne carte-epargne--attention">' +
-        '<p class="carte-stat-label">⚠ Découvert prévu</p>' +
-        '<p style="margin:2px 0;font-weight:600">Le '+formatDateAffichage(decouvert.date)+', votre solde passerait à '+formatMontant(decouvert.solde)+'</p>' +
+        '<p class="carte-stat-label">⚠ Découvert prévu le '+formatDateAffichage(decouvert.date)+'</p>' +
+        '<p style="margin:2px 0;font-weight:600">Votre solde passerait à '+formatMontant(decouvert.solde)+'</p>' +
         '<p class="aide-texte" style="margin:0">Après « '+escapeHtml(decouvert.declencheur.description || (decouvert.declencheur.type==='entree'?'Entrée':'Sortie'))+' » ('+formatMontant(decouvert.declencheur.montant)+'), selon les échéances déjà saisies.</p>' +
       '</div>'
     ) : '';
