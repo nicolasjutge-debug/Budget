@@ -400,6 +400,7 @@
     {id:'loisirs', nom:'Loisirs & sorties', couleur:'#C4703F', objectif:10},
     {id:'abonnements', nom:'Abonnements', couleur:'#6B8CAE', objectif:5},
     {id:'epargne', nom:'Épargne', couleur:'#1E4B3A', objectif:10},
+    {id:'interessement', nom:'Intéressement', couleur:'#3E7C5A', objectif:5},
     {id:'autres', nom:'Autres', couleur:'#8A7F6E', objectif:5},
     {id:'virements', nom:'Virements', couleur:'#6B6E8C', objectif:15}
   ];
@@ -702,8 +703,10 @@
   function soldeGlobal(){
     // Le solde est calculé à date : les mouvements saisis avec une date future (ex. charges
     // récurrentes projetées, virement planifié) ne sont pas encore réalisés et ne doivent
-    // donc pas impacter le solde affiché — ils restent visibles dans Mouvements/Répartition et
-    // regroupés à part dans l'Item « Échéances à venir » du Dashboard (voir echeancesAVenir).
+    // donc pas impacter le solde affiché — ils restent visibles dans Répartition/Optimisation (qui
+    // raisonnent sur la période, pas sur l'instant présent) et regroupés à part dans l'Item
+    // « Échéances à venir » du Dashboard (voir echeancesAVenir). Mouvements, elle, n'affiche que ce
+    // qui est déjà survenu (voir renderMouvements) : leur place y viendra le jour de leur échéance.
     var aujourdhui = dateLocaleISO();
     return state.transactions.reduce(function(acc,t){
       if(t.date > aujourdhui) return acc;
@@ -808,32 +811,44 @@
   function planOptimisation(){
     var rep = repartitionParCategorie();
     var totalSorties = rep.reduce(function(a,c){ return a+c.montant; }, 0);
-    // Le montant qui alimente la carte « Épargne » regroupe la catégorie « Épargne » brute ET tous
-    // les virements vers un compte d'épargne (estCompte:true) — cohérent avec montantEpargnePeriode
-    // utilisé par la carte « Taux d'épargne » juste au-dessus. Sans ce regroupement, un virement vers
-    // un compte d'épargne (n'ayant pas sa propre carte ici — voir le filtre estCompte plus bas) ne
-    // remontait nulle part dans le plan, laissant la carte « Épargne » à 0% de façon trompeuse alors
-    // que l'utilisateur épargne bel et bien, juste via ce mécanisme plutôt que la catégorie brute.
-    var montantEpargneTotal = rep.filter(function(c){ return c.id==='epargne' || c.estCompte; })
+    // La carte « Épargne & Intéressement » fusionne trois sources : la catégorie « Épargne » brute,
+    // la catégorie « Intéressement » (distincte en Répartition — repartitionParCategorie les affiche
+    // telles quelles — mais comptée avec Épargne ici : deux enveloppes de mise de côté, un seul plan)
+    // et tous les virements vers un compte d'épargne (estCompte:true) — cohérent avec
+    // montantEpargnePeriode utilisé par la carte « Taux d'épargne » juste au-dessus. Sans ce
+    // regroupement, ces montants ne remontaient nulle part dans le plan, laissant la carte trompeuse
+    // alors que l'utilisateur épargne bel et bien, juste via ces mécanismes plutôt que la seule
+    // catégorie Épargne. L'objectif affiché additionne de la même façon les objectifs d'Épargne et
+    // d'Intéressement (les comptes n'en apportent pas, le leur est forcé à 0 juste en dessous).
+    var catEpargne = rep.filter(function(c){ return c.id==='epargne'; })[0];
+    var catInteressement = rep.filter(function(c){ return c.id==='interessement'; })[0];
+    var montantEpargneTotal = rep.filter(function(c){ return c.id==='epargne' || c.id==='interessement' || c.estCompte; })
       .reduce(function(a,c){ return a+c.montant; }, 0);
-    // Les virements vers un compte d'épargne sont exclus des cartes individuelles du plan : leur
-    // montant est déjà entièrement reflété dans la carte « Épargne » ci-dessus, et une carte séparée
-    // par compte avec un objectif à 0% n'aurait pas de sens ici (elle garde sa place dans Répartition,
-    // où repartitionParCategorie les affiche telles quelles).
-    return rep.filter(function(c){ return !c.estCompte; }).map(function(c){
-      var montant = c.id==='epargne' ? montantEpargneTotal : c.montant;
+    var objectifEpargneTotal = (catEpargne?catEpargne.objectif:0) + (catInteressement?catInteressement.objectif:0);
+    // Les virements vers un compte d'épargne, et Intéressement, sont exclus des cartes individuelles
+    // du plan : leur montant (et pour Intéressement, son objectif) est déjà entièrement reflété dans
+    // la carte fusionnée ci-dessus — une carte séparée n'aurait pas de sens ici (ils gardent leur
+    // place dans Répartition, où repartitionParCategorie les affiche tels quels).
+    return rep.filter(function(c){ return !c.estCompte && c.id!=='interessement'; }).map(function(c){
+      var estEpargne = c.id==='epargne';
+      var montant = estEpargne ? montantEpargneTotal : c.montant;
+      var objectif = estEpargne ? objectifEpargneTotal : c.objectif;
+      var nom = (estEpargne && catInteressement) ? 'Épargne & Intéressement' : c.nom;
       var pct = totalSorties>0 ? (montant/totalSorties*100) : 0;
-      return {id:c.id, nom:c.nom, couleur:c.couleur, objectif:c.objectif, montant:montant, pct:pct, ecart:pct - c.objectif};
+      return {id:c.id, nom:nom, couleur:c.couleur, objectif:objectif, montant:montant, pct:pct, ecart:pct - objectif};
     }).sort(function(a,b){ return b.ecart - a.ecart; });
   }
-  // Les sorties catégorisées « Épargne » sont de l'argent mis de côté, pas dépensé : on les retire
-  // des sorties prises en compte pour le taux d'épargne réel, sinon un virement vers l'épargne fait
-  // mécaniquement baisser ce taux alors qu'il traduit l'inverse (cf. incohérence -8,9% vs carte
-  // Épargne à 47% du plan d'optimisation, qui elle raisonne déjà correctement par catégorie).
-  // Même raisonnement pour un virement vers un compte d'épargne (compteVirement renseigné, voir
-  // remplirComptesVirement) : c'est aussi de l'épargne, pas une dépense.
+  // Les sorties catégorisées « Épargne » ou « Intéressement » sont de l'argent mis de côté, pas
+  // dépensé : on les retire des sorties prises en compte pour le taux d'épargne réel, sinon un
+  // virement vers l'épargne fait mécaniquement baisser ce taux alors qu'il traduit l'inverse (cf.
+  // incohérence -8,9% vs carte Épargne à 47% du plan d'optimisation, qui elle raisonne déjà
+  // correctement par catégorie). Même raisonnement pour un virement vers un compte d'épargne
+  // (compteVirement renseigné, voir remplirComptesVirement) : c'est aussi de l'épargne, pas une
+  // dépense. Intéressement est ici volontairement traité comme Épargne, les deux étant fusionnés
+  // dans la carte « Épargne & Intéressement » du plan d'optimisation (voir planOptimisation) : les
+  // séparer ici recréerait la même incohérence entre ce taux global et cette carte.
   function montantEpargnePeriode(){
-    return transactionsPeriode().filter(function(t){ return t.type==='sortie' && (t.categorie==='epargne' || !!t.compteVirement); })
+    return transactionsPeriode().filter(function(t){ return t.type==='sortie' && (t.categorie==='epargne' || t.categorie==='interessement' || !!t.compteVirement); })
       .reduce(function(a,t){ return a+t.montant; }, 0);
   }
   function epargneNettePeriode(){
@@ -995,6 +1010,22 @@
       migrees++;
     });
     return migrees;
+  }
+  // Migration ponctuelle et idempotente : ajoute la catégorie de sortie « Intéressement » si elle
+  // n'existe pas déjà, pour la fusionner avec « Épargne » dans le plan d'optimisation (voir
+  // planOptimisation) — sans elle, un compte déjà en place continuerait de raisonner sur la seule
+  // catégorie Épargne. Comparaison par nom insensible à la casse (même logique qu'à l'ajout manuel
+  // d'une catégorie, voir ajouterCategorie) : un ajout déjà fait à la main sous un autre id n'est
+  // donc jamais dupliqué. Les objectifs existants sont rééquilibrés pour lui faire de la place,
+  // comme pour tout ajout de catégorie (voir reequilibrerObjectifsApresAjout) ; sur une installation
+  // neuve, la catégorie est déjà présente via CATEGORIES_SORTIE_DEFAUT et cette fonction ne fait rien.
+  function ajouterCategorieInteressementSiAbsente(){
+    var dejaPresente = state.categoriesSortie.some(function(c){ return c.nom.toLowerCase()==='intéressement'; });
+    if(dejaPresente) return false;
+    var nouvelle = {id:'interessement', nom:'Intéressement', couleur:'#3E7C5A', objectif:5};
+    reequilibrerObjectifsApresAjout(state.categoriesSortie, nouvelle);
+    state.categoriesSortie.push(nouvelle);
+    return true;
   }
   // Nettoyage : supprime les occurrences en double d'une même série récurrente à la même date
   // (même recurrenceId + même date), quelle qu'en soit l'origine — génération accidentelle avant
@@ -1212,10 +1243,14 @@
     '</select>';
 
     var moisCourantMvts = dateLocaleISO().slice(0,7);
+    // Mouvements n'affiche que ce qui est déjà survenu à date, sur Courant comme sur un compte
+    // d'épargne (voir aussi le filtre identique un peu plus bas pour Courant) — le futur a sa place
+    // dans Échéances à venir sur le Dashboard, pas ici (voir soldeGlobal).
+    var aujourdhuiMvts = dateLocaleISO();
 
     if(compteAffiche){
       var compte = getCompte(compteAffiche);
-      var txsCompte = (compte.transactions||[]).filter(function(t){ return t.date.slice(0,7)===moisCourantMvts; }).sort(trierParDateDesc);
+      var txsCompte = (compte.transactions||[]).filter(function(t){ return t.date.slice(0,7)===moisCourantMvts && t.date<=aujourdhuiMvts; }).sort(trierParDateDesc);
       el.innerHTML =
         '<h2 class="section-titre">Mouvements</h2>' +
         '<div class="filtres-mouvements">' + selectCompteHtml + '</div>' +
@@ -1231,11 +1266,11 @@
 
     var filtreCat = state.filtreCategorie || 'toutes';
     var filtreRec = state.filtreRecurrence || 'toutes';
-    // Mouvements affiche le mois en cours uniquement — le passé a sa place dans Archives, et le
-    // futur (ex. la prochaine échéance d'une série annuelle, mécaniquement datée l'an prochain, ou
-    // les mois restants d'une série mensuelle déjà pré-générés jusqu'à décembre) dans Échéances à
-    // venir sur le Dashboard, pas ici.
-    var txs = state.transactions.filter(function(t){ return t.date.slice(0,7)===moisCourantMvts; }).sort(trierParDateDesc);
+    // Mouvements affiche le mois en cours et déjà survenu uniquement — le passé a sa place dans
+    // Archives, et le futur (ex. une occurrence plus tard ce mois-ci, la prochaine échéance d'une
+    // série annuelle mécaniquement datée l'an prochain, ou les mois restants d'une série mensuelle
+    // déjà pré-générés jusqu'à décembre) dans Échéances à venir sur le Dashboard, pas ici.
+    var txs = state.transactions.filter(function(t){ return t.date.slice(0,7)===moisCourantMvts && t.date<=aujourdhuiMvts; }).sort(trierParDateDesc);
     if(filtreCat !== 'toutes'){ txs = txs.filter(function(t){ return t.categorie===filtreCat; }); }
     if(filtreRec === 'ponctuels'){ txs = txs.filter(function(t){ return !t.recurrent; }); }
     else if(filtreRec === 'recurrents'){ txs = txs.filter(function(t){ return !!t.recurrent; }); }
@@ -2860,7 +2895,8 @@
       var nbMigrees = migrerVirementsVersNouveauChamp();
       var nbSupprimees = dedupliquerRecurrences();
       var nbAjoutees = synchroniserRecurrences();
-      if(nbMigrees>0 || nbSupprimees>0 || nbAjoutees>0) sauvegarder();
+      var categorieInteressementAjoutee = ajouterCategorieInteressementSiAbsente();
+      if(nbMigrees>0 || nbSupprimees>0 || nbAjoutees>0 || categorieInteressementAjoutee) sauvegarder();
       demarrer();
       var decouvert = projeterDecouvert();
       // Même seuil (SEUIL_JOURS_ALERTE_DECOUVERT) que sur le Dashboard (voir renderDashboard) : évite
