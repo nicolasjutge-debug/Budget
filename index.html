@@ -407,6 +407,7 @@
   var CATEGORIES_ENTREE_DEFAUT = [
     {id:'salaire', nom:'Salaire', couleur:'#1E4B3A'},
     {id:'primes', nom:'Primes', couleur:'#2E7D53'},
+    {id:'interessement', nom:'Intéressement', couleur:'#3E7C5A'},
     {id:'remboursements', nom:'Remboursements', couleur:'#6B8CAE'},
     {id:'autres-revenus', nom:'Autres revenus', couleur:'#8A7F6E'},
     {id:'virements', nom:'Virements', couleur:'#6B6E8C'}
@@ -782,6 +783,17 @@
     }
     return c.objectif||0;
   }
+  // Retrouve la catégorie « Intéressement » par son nom plutôt que par un id fixe (côté sortie par
+  // défaut, ou côté entrée si demandé) : si elle avait déjà été créée à la main (via Ajouter une
+  // catégorie, avant ce correctif) elle porte un id généré par genId(), pas un id littéral — un
+  // filtre sur l'id la manquerait silencieusement et casserait sa reconnaissance ci-dessous. La
+  // comparaison par nom (comme ajouterCategorie le fait déjà pour éviter les doublons) fonctionne
+  // dans tous les cas.
+  function idCategorieInteressement(type){
+    var liste = type==='entree' ? state.categoriesEntree : state.categoriesSortie;
+    var cat = liste.filter(function(c){ return c.nom.toLowerCase()==='intéressement'; })[0];
+    return cat ? cat.id : null;
+  }
   function repartitionParCategorie(){
     var txs = transactionsPeriode().filter(function(t){return t.type==='sortie';});
     var total = txs.reduce(function(a,t){return a+t.montant;},0);
@@ -820,16 +832,17 @@
     // alors que l'utilisateur épargne bel et bien, juste via ces mécanismes plutôt que la seule
     // catégorie Épargne. L'objectif affiché additionne de la même façon les objectifs d'Épargne et
     // d'Intéressement (les comptes n'en apportent pas, le leur est forcé à 0 juste en dessous).
+    var idInteressement = idCategorieInteressement();
     var catEpargne = rep.filter(function(c){ return c.id==='epargne'; })[0];
-    var catInteressement = rep.filter(function(c){ return c.id==='interessement'; })[0];
-    var montantEpargneTotal = rep.filter(function(c){ return c.id==='epargne' || c.id==='interessement' || c.estCompte; })
+    var catInteressement = idInteressement ? rep.filter(function(c){ return c.id===idInteressement; })[0] : undefined;
+    var montantEpargneTotal = rep.filter(function(c){ return c.id==='epargne' || c.id===idInteressement || c.estCompte; })
       .reduce(function(a,c){ return a+c.montant; }, 0);
     var objectifEpargneTotal = (catEpargne?catEpargne.objectif:0) + (catInteressement?catInteressement.objectif:0);
     // Les virements vers un compte d'épargne, et Intéressement, sont exclus des cartes individuelles
     // du plan : leur montant (et pour Intéressement, son objectif) est déjà entièrement reflété dans
     // la carte fusionnée ci-dessus — une carte séparée n'aurait pas de sens ici (ils gardent leur
     // place dans Répartition, où repartitionParCategorie les affiche tels quels).
-    return rep.filter(function(c){ return !c.estCompte && c.id!=='interessement'; }).map(function(c){
+    return rep.filter(function(c){ return !c.estCompte && c.id!==idInteressement; }).map(function(c){
       var estEpargne = c.id==='epargne';
       var montant = estEpargne ? montantEpargneTotal : c.montant;
       var objectif = estEpargne ? objectifEpargneTotal : c.objectif;
@@ -848,7 +861,8 @@
   // dans la carte « Épargne & Intéressement » du plan d'optimisation (voir planOptimisation) : les
   // séparer ici recréerait la même incohérence entre ce taux global et cette carte.
   function montantEpargnePeriode(){
-    return transactionsPeriode().filter(function(t){ return t.type==='sortie' && (t.categorie==='epargne' || t.categorie==='interessement' || !!t.compteVirement); })
+    var idInteressement = idCategorieInteressement();
+    return transactionsPeriode().filter(function(t){ return t.type==='sortie' && (t.categorie==='epargne' || t.categorie===idInteressement || !!t.compteVirement); })
       .reduce(function(a,t){ return a+t.montant; }, 0);
   }
   function epargneNettePeriode(){
@@ -1011,21 +1025,30 @@
     });
     return migrees;
   }
-  // Migration ponctuelle et idempotente : ajoute la catégorie de sortie « Intéressement » si elle
-  // n'existe pas déjà, pour la fusionner avec « Épargne » dans le plan d'optimisation (voir
-  // planOptimisation) — sans elle, un compte déjà en place continuerait de raisonner sur la seule
-  // catégorie Épargne. Comparaison par nom insensible à la casse (même logique qu'à l'ajout manuel
-  // d'une catégorie, voir ajouterCategorie) : un ajout déjà fait à la main sous un autre id n'est
-  // donc jamais dupliqué. Les objectifs existants sont rééquilibrés pour lui faire de la place,
-  // comme pour tout ajout de catégorie (voir reequilibrerObjectifsApresAjout) ; sur une installation
-  // neuve, la catégorie est déjà présente via CATEGORIES_SORTIE_DEFAUT et cette fonction ne fait rien.
+  // Migration ponctuelle et idempotente : ajoute la catégorie « Intéressement », côté sortie (pour
+  // la fusionner avec « Épargne » dans le plan d'optimisation, voir planOptimisation) et côté entrée
+  // (pour la reconnaître à l'import d'un relevé, voir categoriserEntreeReleve) si elle n'existe pas
+  // déjà de chaque côté — comme le ferait ajouterCategorie pour toute nouvelle catégorie, qui duplique
+  // aussi automatiquement dans l'autre liste. Comparaison par nom insensible à la casse (même logique
+  // qu'à l'ajout manuel) : un ajout déjà fait à la main sous un autre id n'est donc jamais dupliqué —
+  // et comme planOptimisation/montantEpargnePeriode/categoriserEntreeReleve la retrouvent aussi par
+  // nom (voir idCategorieInteressement), peu importe l'id déjà en place. Les objectifs existants sont
+  // rééquilibrés pour lui faire de la place côté sortie, comme pour tout ajout (voir
+  // reequilibrerObjectifsApresAjout) ; sur une installation neuve, les deux existent déjà via
+  // CATEGORIES_SORTIE_DEFAUT/CATEGORIES_ENTREE_DEFAUT et cette fonction ne fait rien.
   function ajouterCategorieInteressementSiAbsente(){
-    var dejaPresente = state.categoriesSortie.some(function(c){ return c.nom.toLowerCase()==='intéressement'; });
-    if(dejaPresente) return false;
-    var nouvelle = {id:'interessement', nom:'Intéressement', couleur:'#3E7C5A', objectif:5};
-    reequilibrerObjectifsApresAjout(state.categoriesSortie, nouvelle);
-    state.categoriesSortie.push(nouvelle);
-    return true;
+    var ajoutee = false;
+    if(!state.categoriesSortie.some(function(c){ return c.nom.toLowerCase()==='intéressement'; })){
+      var nouvelleSortie = {id:genId(), nom:'Intéressement', couleur:'#3E7C5A', objectif:5};
+      reequilibrerObjectifsApresAjout(state.categoriesSortie, nouvelleSortie);
+      state.categoriesSortie.push(nouvelleSortie);
+      ajoutee = true;
+    }
+    if(!state.categoriesEntree.some(function(c){ return c.nom.toLowerCase()==='intéressement'; })){
+      state.categoriesEntree.push({id:genId(), nom:'Intéressement', couleur:'#3E7C5A'});
+      ajoutee = true;
+    }
+    return ajoutee;
   }
   // Nettoyage : supprime les occurrences en double d'une même série récurrente à la même date
   // (même recurrenceId + même date), quelle qu'en soit l'origine — génération accidentelle avant
@@ -2217,6 +2240,12 @@
     if(l.indexOf('compte cheques') !== -1) return 'virements';
     if(l.indexOf('jutge nicolas') !== -1 || l.indexOf('nicolas jutge') !== -1) return 'virements';
     if(l.indexOf('dgfip') !== -1) return 'remboursements';
+    // Un versement d'intéressement (employeur ou dans un relevé de compte d'épargne/PEE — même
+    // fonction d'analyse pour les deux, voir analyserReleveCSV) arrive comme un revenu : sans cette
+    // règle il retombait dans Autres revenus et fallait le recatégoriser à la main à chaque import.
+    // Recherche par nom (idCategorieInteressement) : fonctionne même si la catégorie a été créée à
+    // la main sous un autre id.
+    if(l.indexOf('interessement') !== -1) return idCategorieInteressement('entree') || 'autres-revenus';
     return 'autres-revenus';
   }
   // Détecte le type de paiement à partir des préfixes standards d'un libellé de relevé bancaire
