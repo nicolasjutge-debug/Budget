@@ -104,6 +104,7 @@
     box-shadow:0 1px 2px rgba(27,35,30,0.05), 0 6px 16px rgba(27,35,30,0.05);
   }
   .carte-stat-label{ font-size:11px; color:var(--ink-soft); margin:0 0 4px; text-transform:uppercase; letter-spacing:.06em; }
+  .carte-stat-periode{ display:block; }
   .carte-stat-valeur{ font-family:var(--font-mono); font-size:17px; font-weight:600; margin:0; font-variant-numeric:tabular-nums; }
 
   .section-titre{ font-family:var(--font-display); font-size:18px; font-weight:600; margin:16px 0 10px; color:var(--ink); }
@@ -1241,8 +1242,8 @@
       '</div>' +
       blocDecouvert +
       '<div class="grille-stats">' +
-        '<div class="carte-stat"><p class="carte-stat-label">Entrées · '+libellePeriode()+'</p><p class="carte-stat-valeur ink-credit">+'+formatMontant(t.entrees)+'</p></div>' +
-        '<div class="carte-stat"><p class="carte-stat-label">Sorties · '+libellePeriode()+'</p><p class="carte-stat-valeur ink-debit">-'+formatMontant(t.sorties)+'</p></div>' +
+        '<div class="carte-stat"><p class="carte-stat-label">Entrées<span class="carte-stat-periode">'+libellePeriode()+'</span></p><p class="carte-stat-valeur ink-credit">+'+formatMontant(t.entrees)+'</p></div>' +
+        '<div class="carte-stat"><p class="carte-stat-label">Sorties<span class="carte-stat-periode">'+libellePeriode()+'</span></p><p class="carte-stat-valeur ink-debit">-'+formatMontant(t.sorties)+'</p></div>' +
       '</div>' +
       renderBlocComptesDashboard() +
       renderBlocEcheances(echeances) +
