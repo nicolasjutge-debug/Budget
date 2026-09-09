@@ -128,6 +128,11 @@
   .segment-type.segment-type--compact button{ font-size:12.5px; padding:9px 4px; }
   .select-filtre{ width:100%; font-family:var(--font-body); font-size:14px; padding:10px 12px; border-radius:10px; border:1px solid var(--line); background:var(--paper-raised); color:var(--ink); }
 
+  .champ-recherche-conteneur{ position:relative; margin-bottom:10px; }
+  .input-recherche{ width:100%; font-family:var(--font-body); font-size:14px; padding:10px 34px 10px 12px; border-radius:10px; border:1px solid var(--line); background:var(--paper-raised); color:var(--ink); -webkit-appearance:none; appearance:none; }
+  .input-recherche::-webkit-search-cancel-button{ -webkit-appearance:none; appearance:none; }
+  .btn-effacer-recherche{ position:absolute; right:2px; top:0; bottom:0; background:none; border:none; color:var(--ink-soft); font-size:13px; cursor:pointer; padding:0 10px; }
+
   .conteneur-donut{ position:relative; width:196px; height:196px; margin:10px auto 20px; }
   .conteneur-donut svg{ width:100%; height:100%; }
   .donut-centre{ position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; }
@@ -453,10 +458,20 @@
   var anneeArchiveOuverte = null; // état d'affichage (repliable) du détail d'une archive dans Réglages
   var compteOuvertId = null; // état d'affichage (repliable) du détail d'un compte d'épargne dans Réglages
   var doublonsOuvert = false; // état d'affichage (repliable) du panneau de vérification des doublons dans Réglages
+  // Texte de la recherche de mouvements (vue Mouvements) : état transitoire comme les 3 variables
+  // ci-dessus, jamais persisté. Porte sur Courant ET tous les comptes d'épargne, toutes dates
+  // confondues (passé et futur) — voir rechercherMouvements.
+  var rechercheMouvementsTexte = '';
 
   // ---------- Utilitaires ----------
   function genId(){ return 'id-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2,8); }
   function escapeHtml(str){ var div = document.createElement('div'); div.textContent = str==null?'':String(str); return div.innerHTML; }
+  // Normalise une chaîne pour une recherche insensible aux accents/casse (ex. « epargne » trouve
+  // « Épargne ») — utilisé uniquement par rechercherMouvements ; triAlpha, lui, trie via
+  // localeCompare et n'en a pas besoin.
+  function normaliserRecherche(str){
+    return String(str==null?'':str).normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+  }
   // Tri alphabétique (locale FR, insensible accents/casse) sans muter la liste d'origine — utilisé
   // partout où des catégories sont listées pour sélection/gestion (dropdown du modal, Postes de
   // dépenses, Sources de revenus, filtre de Mouvements). Ne s'applique volontairement PAS à
@@ -1256,11 +1271,127 @@
     attacherClicsLignes(el);
   }
 
+  // ---------- Recherche de mouvements (Courant + tous les comptes d'épargne, toutes dates) ----------
+  // Contrairement à Mouvements (mois en cours uniquement et déjà survenu, un compte à la fois — voir
+  // renderMouvements plus bas), la recherche porte sur l'intégralité de Courant et de chaque compte
+  // d'épargne, dates passées ET futures confondues (échéances à venir comprises). Les années déjà
+  // archivées restent hors champ : les rouvrir depuis un résultat de recherche demanderait de les
+  // désarchiver au préalable (voir desarchiverAnnee, en Réglages).
+  function rechercherMouvements(requete){
+    var q = normaliserRecherche(requete).trim();
+    if(!q) return [];
+    function texteIndexe(t, compteNom){
+      var cat = getCategorie(t.categorie, t.type);
+      var compteVir = t.compteVirement ? getCompte(t.compteVirement) : null;
+      return [
+        t.description, cat.nom, compteNom, compteVir ? compteVir.nom : '',
+        t.typePaiement ? LIBELLES_TYPE_PAIEMENT[t.typePaiement] : '',
+        formatMontant(t.montant), formatDateAffichage(t.date), t.date
+      ].filter(Boolean).join(' ');
+    }
+    var resultats = [];
+    state.transactions.forEach(function(t){
+      if(normaliserRecherche(texteIndexe(t,'Courant')).indexOf(q)!==-1) resultats.push({t:t, compteNom:'Courant'});
+    });
+    state.comptes.forEach(function(compte){
+      (compte.transactions||[]).forEach(function(t){
+        if(normaliserRecherche(texteIndexe(t,compte.nom)).indexOf(q)!==-1) resultats.push({t:t, compteNom:compte.nom});
+      });
+    });
+    resultats.sort(function(a,b){ return trierParDateDesc(a.t,b.t); });
+    return resultats;
+  }
+  // Rendu quasi identique à renderListeMouvements, à ceci près que chaque ligne précise sur quel
+  // compte se trouve le mouvement (les résultats mélangent Courant et plusieurs comptes d'épargne) —
+  // sans dupliquer les transactions ni leur ajouter de propriété, pour ne rien changer à ce qui est
+  // sauvegardé (voir sauvegarder). Cliquer une ligne ouvre le même formulaire de modification que
+  // partout ailleurs (voir attacherClicsLignes/ouvrirModal) : la recherche ne fait que retrouver le
+  // mouvement, l'édition elle-même n'a rien de spécifique.
+  function renderResultatsRecherche(resultats, requete){
+    if(resultats.length===0){
+      return '<div class="etat-vide"><p>Aucun mouvement ne correspond à « '+escapeHtml(requete)+' ».</p>' +
+        '<p class="etat-vide-sous">Vérifiez l\'orthographe ou essayez un terme plus court.</p></div>';
+    }
+    var aujourdhui = dateLocaleISO();
+    return '<div class="liste-mvts">' + resultats.map(function(r){
+      var t = r.t;
+      var cat = getCategorie(t.categorie, t.type);
+      var compteVir = t.compteVirement ? getCompte(t.compteVirement) : null;
+      var libelleVirement = compteVir ? ((t.type==='sortie'?'Virement vers ':'Virement depuis ')+compteVir.nom) : null;
+      var signe = t.type==='entree' ? '+' : '-';
+      var classe = t.type==='entree' ? 'ink-credit' : 'ink-debit';
+      var marques = '';
+      if(t.date > aujourdhui) marques += ' · <span class="marque-avenir">à venir</span>';
+      if(t.recurrent) marques += ' <span class="marque-recurrent" title="Mouvement récurrent">↻'+(LIBELLES_FREQUENCE[t.recurrenceFrequence] ? ' '+LIBELLES_FREQUENCE[t.recurrenceFrequence] : '')+'</span>';
+      var sousTitre = (libelleVirement ? libelleVirement : (cat.nom + (t.typePaiement && LIBELLES_TYPE_PAIEMENT[t.typePaiement] ? ' · '+LIBELLES_TYPE_PAIEMENT[t.typePaiement] : '')));
+      return '<button class="ligne-mvt" data-id="'+t.id+'" type="button">' +
+        '<span class="ligne-mvt-tick" style="background:'+(compteVir ? compteVir.couleur : cat.couleur)+'"></span>' +
+        '<span class="ligne-mvt-corps">' +
+          '<span class="ligne-mvt-titre">'+escapeHtml(t.description || libelleVirement || cat.nom)+'</span>' +
+          '<span class="ligne-mvt-sous">'+escapeHtml(r.compteNom)+' · '+escapeHtml(sousTitre)+' · '+formatDateAffichage(t.date)+marques+'</span>' +
+        '</span>' +
+        '<span class="ligne-mvt-montant '+classe+'">'+signe+formatMontant(t.montant)+'</span>' +
+      '</button>';
+    }).join('') + '</div>';
+  }
+  // Balisage du champ, partagé par les 3 rendus possibles de Mouvements (recherche active, un compte
+  // sélectionné, Courant avec filtres — voir renderMouvements) afin qu'il reste visible et utilisable
+  // depuis n'importe lequel des trois.
+  function champRechercheHtml(){
+    return '<div class="champ-recherche-conteneur">' +
+      '<input type="search" id="input-recherche-mvts" class="input-recherche" placeholder="Rechercher : libellé, montant, catégorie, compte…" autocomplete="off" value="'+escapeHtml(rechercheMouvementsTexte)+'">' +
+      (rechercheMouvementsTexte ? '<button type="button" id="btn-effacer-recherche" class="btn-effacer-recherche" aria-label="Effacer la recherche">✕</button>' : '') +
+    '</div>';
+  }
+  // Ré-injecté à chaque rendu (comme le reste de la vue, entièrement redessinée via innerHTML) : le
+  // focus et la position du curseur sont donc restaurés manuellement après ré-affichage, sinon chaque
+  // frappe ferait perdre le focus du champ.
+  function attacherChampRecherche(el){
+    var input = el.querySelector('#input-recherche-mvts');
+    if(!input) return;
+    input.addEventListener('input', function(e){
+      rechercheMouvementsTexte = e.target.value;
+      var position = e.target.selectionStart;
+      renderMouvements();
+      var nouveauInput = document.getElementById('input-recherche-mvts');
+      if(nouveauInput){
+        nouveauInput.focus();
+        if(typeof position === 'number') nouveauInput.setSelectionRange(position, position);
+      }
+    });
+    var btnEffacer = el.querySelector('#btn-effacer-recherche');
+    if(btnEffacer){
+      btnEffacer.addEventListener('click', function(){
+        rechercheMouvementsTexte = '';
+        renderMouvements();
+      });
+    }
+  }
+
   // ---------- Rendu : Mouvements ----------
   function renderMouvements(){
     var el = document.getElementById('vue-mouvements');
     var compteAffiche = state.compteAffiche || '';
     if(compteAffiche && !getCompte(compteAffiche)) compteAffiche = state.compteAffiche = ''; // compte supprimé entretemps
+
+    // La recherche prime sur tout le reste de la vue : elle porte sur Courant ET tous les comptes
+    // d'épargne à la fois (pas seulement celui sélectionné ci-dessous), toutes dates confondues — les
+    // sélecteurs compte/catégorie/récurrence n'ont donc pas lieu d'être tant qu'elle est active (voir
+    // rechercherMouvements).
+    var texteRecherche = rechercheMouvementsTexte.trim();
+    if(texteRecherche){
+      var resultatsRecherche = rechercherMouvements(texteRecherche);
+      var resumeRechercheHtml = '<p class="aide-texte">'+resultatsRecherche.length+' résultat'+(resultatsRecherche.length>1?'s':'')+' pour « '+escapeHtml(texteRecherche)+' » · Courant et comptes d\'épargne, toutes dates</p>';
+      el.innerHTML =
+        '<h2 class="section-titre">Mouvements</h2>' +
+        champRechercheHtml() +
+        resumeRechercheHtml +
+        renderResultatsRecherche(resultatsRecherche, texteRecherche);
+      attacherChampRecherche(el);
+      attacherClicsLignes(el);
+      return;
+    }
+
     var selectCompteHtml = '<select id="select-compte-mouvements" class="select-filtre">' +
       '<option value="">Courant</option>' +
       triAlpha(state.comptes).map(function(c){ return '<option value="'+c.id+'" '+(c.id===compteAffiche?'selected':'')+'>'+escapeHtml(c.nom)+'</option>'; }).join('') +
@@ -1269,7 +1400,8 @@
     var moisCourantMvts = dateLocaleISO().slice(0,7);
     // Mouvements n'affiche que ce qui est déjà survenu à date, sur Courant comme sur un compte
     // d'épargne (voir aussi le filtre identique un peu plus bas pour Courant) — le futur a sa place
-    // dans Échéances à venir sur le Dashboard, pas ici (voir soldeGlobal).
+    // dans Échéances à venir sur le Dashboard, pas ici (voir soldeGlobal). La recherche ci-dessus est
+    // la seule façon de retrouver un mouvement passé (hors mois en cours) ou futur depuis cette vue.
     var aujourdhuiMvts = dateLocaleISO();
 
     if(compteAffiche){
@@ -1277,6 +1409,7 @@
       var txsCompte = (compte.transactions||[]).filter(function(t){ return t.date.slice(0,7)===moisCourantMvts && t.date<=aujourdhuiMvts; }).sort(trierParDateDesc);
       el.innerHTML =
         '<h2 class="section-titre">Mouvements</h2>' +
+        champRechercheHtml() +
         '<div class="filtres-mouvements">' + selectCompteHtml + '</div>' +
         '<p class="aide-texte">Solde actuel : '+formatMontant(soldeCompte(compte))+'</p>' +
         renderListeMouvements(txsCompte, false, 'Aucun mouvement ce mois-ci sur ce compte.', 'Ajoutez un mouvement ou importez un relevé pour commencer.');
@@ -1284,6 +1417,7 @@
         state.compteAffiche = e.target.value;
         renderMouvements();
       });
+      attacherChampRecherche(el);
       attacherClicsLignes(el);
       return;
     }
@@ -1310,6 +1444,7 @@
     }
     el.innerHTML =
       '<h2 class="section-titre">Mouvements</h2>' +
+      champRechercheHtml() +
       '<div class="filtres-mouvements">' +
         selectCompteHtml +
         '<select id="select-filtre-cat" class="select-filtre">' +
@@ -1338,6 +1473,7 @@
         renderMouvements();
       });
     });
+    attacherChampRecherche(el);
     attacherClicsLignes(el);
   }
 
