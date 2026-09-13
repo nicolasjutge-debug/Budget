@@ -106,6 +106,7 @@
   .carte-stat-label{ font-size:11px; color:var(--ink-soft); margin:0 0 4px; text-transform:uppercase; letter-spacing:.06em; }
   .carte-stat-periode{ display:block; }
   .carte-stat-valeur{ font-family:var(--font-mono); font-size:17px; font-weight:600; margin:0; font-variant-numeric:tabular-nums; }
+  .carte-stat-sous{ font-size:11px; color:var(--ink-soft); margin:4px 0 0; font-variant-numeric:tabular-nums; }
 
   .section-titre{ font-family:var(--font-display); font-size:18px; font-weight:600; margin:16px 0 10px; color:var(--ink); }
   .section-titre-ligne{ display:flex; align-items:baseline; justify-content:space-between; }
@@ -491,6 +492,11 @@
     d = d || new Date();
     return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
   }
+  // Date (YYYY-MM-DD) du dernier jour du mois courant — sert de borne à soldeCompteFinMois.
+  function finMoisISO(){
+    var now = new Date();
+    return dateLocaleISO(new Date(now.getFullYear(), now.getMonth()+1, 0));
+  }
   // Nombre de jours calendaires entre aujourd'hui et une date (YYYY-MM-DD) donnée — comparaison à
   // minuit des deux dates (pas d'écart en heures/minutes). Utilisé pour ne signaler un découvert
   // prévu qu'à l'approche de l'échéance (voir renderDashboard) plutôt que dès sa détection, parfois
@@ -539,6 +545,17 @@
     var aujourdhui = dateLocaleISO();
     return (compte.transactions||[]).reduce(function(acc,t){
       if(t.date > aujourdhui) return acc;
+      return acc + (t.type==='entree'? t.montant : -t.montant);
+    }, compte.soldeInitial||0);
+  }
+  // Solde projeté à fin du mois courant : mêmes opérations que soldeCompte, plus celles déjà
+  // saisies (récurrentes ou ponctuelles) dont la date tombe encore ce mois-ci mais n'est pas encore
+  // arrivée — pour anticiper le solde du compte d'épargne une fois ces opérations finalisées, sans
+  // attendre leur échéance réelle. Au-delà de fin de mois, une occurrence reste exclue comme avant.
+  function soldeCompteFinMois(compte){
+    var finMois = finMoisISO();
+    return (compte.transactions||[]).reduce(function(acc,t){
+      if(t.date > finMois) return acc;
       return acc + (t.type==='entree'? t.montant : -t.montant);
     }, compte.soldeInitial||0);
   }
@@ -1217,7 +1234,9 @@
       '<div class="grille-stats" style="margin-bottom:20px">' + state.comptes.map(function(c){
         var solde = soldeCompte(c);
         var positif = solde>=0;
-        return '<div class="carte-stat"><p class="carte-stat-label">'+escapeHtml(c.nom)+'</p><p class="carte-stat-valeur '+(positif?'ink-credit':'ink-debit')+'">'+formatMontant(solde)+'</p></div>';
+        var soldeFinMois = soldeCompteFinMois(c);
+        var positifFinMois = soldeFinMois>=0;
+        return '<div class="carte-stat"><p class="carte-stat-label">'+escapeHtml(c.nom)+'</p><p class="carte-stat-valeur '+(positif?'ink-credit':'ink-debit')+'">'+formatMontant(solde)+'</p><p class="carte-stat-sous">Fin de mois : <span class="'+(positifFinMois?'ink-credit':'ink-debit')+'">'+formatMontant(soldeFinMois)+'</span></p></div>';
       }).join('') + '</div>';
   }
 
@@ -1765,6 +1784,7 @@
           '</button>' +
           (ouvert ? (
             '<div class="detail-compte">' +
+              '<p class="aide-texte" style="margin-top:0">Solde fin de mois (prévu) : '+formatMontant(soldeCompteFinMois(c))+'</p>' +
               '<label class="etiquette-champ">Nom du compte' +
                 '<input type="text" class="input-texte" data-champ-compte="nom" data-id="'+c.id+'" value="'+escapeHtml(c.nom)+'"></label>' +
               '<label class="etiquette-champ" style="margin-top:8px">Solde initial (avant le premier mouvement)' +
