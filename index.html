@@ -613,22 +613,57 @@
       state.transactions = state.transactions.filter(function(x){ return x.id!==trouve.transaction.id; });
     }
   }
-  // Recalcule les écritures miroir de toute une série récurrente après un changement du seuil
-  // « Miroir à partir de » : crée le miroir manquant pour toute occurrence désormais couverte
-  // (date >= seuil, ou toujours couverte si seuil vide) qui n'en a pas encore, et retire le miroir
-  // de toute occurrence qui n'est plus couverte mais en avait un. Idempotent — sans effet si l'état
-  // correspond déjà au seuil demandé.
-  function resynchroniserMiroirsSerie(recurrenceId, seuil, compteVirementId){
-    state.transactions.forEach(function(occ){
-      if(occ.recurrenceId !== recurrenceId) return;
-      var couverte = !!compteVirementId && occ.date >= (seuil || occ.date);
-      if(couverte && !occ.miroirId){
-        creerMiroirVirement(occ);
-      } else if(!couverte && occ.miroirId){
-        supprimerMiroirLie(occ);
-        occ.miroirId = null;
+  // Une série récurrente représente une seule et même charge/recette dans le temps (voir
+  // fabriquerOccurrence, qui copie déjà tous ces champs à la création d'une occurrence) : type,
+  // montant, catégorie, description, type de paiement, compte de virement cible et seuil
+  // « Miroir à partir de » doivent donc rester identiques sur toute la série — seule la date
+  // distingue une occurrence d'une autre. Modifier n'importe lequel de ces champs sur UNE
+  // occurrence le répercute donc sur toutes les autres occurrences À VENIR de la série (même
+  // recurrenceId, date strictement après aujourd'hui — même convention que soldeCompte/
+  // soldeGlobal/nbPassees plus haut : une occurrence datée d'aujourd'hui ou avant est considérée
+  // réalisée). Une occurrence déjà passée n'est JAMAIS modifiée par la cascade : elle a pu être
+  // rapprochée avec un relevé bancaire réel, et la réécrire rétroactivement la ferait diverger de
+  // ce qui s'est réellement passé — seule une édition manuelle et déliberée de CETTE occurrence
+  // précise peut encore la changer. Chaque occurrence sœur à venir voit aussi son éventuelle
+  // écriture miroir (compte d'épargne) resynchronisée : montant/sens/libellé mis à jour en place
+  // si le compte cible n'a pas changé et reste couvert par le seuil, sinon retirée puis recréée
+  // (ou simplement retirée si plus couverte) — même logique de couverture que l'ancienne
+  // resynchroniserMiroirsSerie qu'elle remplace, appliquée occurrence par occurrence puisque
+  // chaque sœur garde sa propre date. Retourne le nombre d'occurrences sœurs mises à jour, pour
+  // le message de confirmation.
+  function propagerModificationSerie(t){
+    var compteCibleApres = getCompte(t.compteVirement);
+    var aujourdhui = dateLocaleISO();
+    var nb = 0;
+    state.transactions.forEach(function(autre){
+      if(autre.recurrenceId !== t.recurrenceId || autre.id === t.id) return;
+      if(autre.date <= aujourdhui) return;
+      nb++;
+      autre.type = t.type;
+      autre.montant = t.montant;
+      autre.categorie = t.categorie;
+      autre.description = t.description;
+      autre.typePaiement = t.typePaiement;
+      autre.compteVirement = t.compteVirement;
+      autre.miroirDepuis = t.miroirDepuis;
+      var couverte = !!compteCibleApres && autre.date >= (autre.miroirDepuis || autre.date);
+      if(autre.miroirId){
+        var lien = trouverMiroir(autre.miroirId, autre.id);
+        if(couverte && lien && lien.source==='compte' && lien.compte.id===compteCibleApres.id){
+          lien.transaction.montant = autre.montant;
+          lien.transaction.type = autre.type==='sortie' ? 'entree' : 'sortie';
+          var libelleAuto = autre.type==='sortie' ? 'Virement depuis Courant' : 'Virement vers Courant';
+          lien.transaction.description = autre.description ? (libelleAuto+' — '+autre.description) : libelleAuto;
+        } else {
+          supprimerMiroirLie(autre);
+          autre.miroirId = null;
+          if(couverte) creerMiroirVirement(autre);
+        }
+      } else if(couverte){
+        creerMiroirVirement(autre);
       }
     });
+    return nb;
   }
 
   // ---------- Stockage ----------
@@ -2905,17 +2940,13 @@
     if(id){
       var t = state.transactions.find(function(x){return x.id===id;});
       if(t){
-        var categoriePrecedente = t.categorie;
+        // Capturé AVANT toute mutation : distingue une occurrence qui appartenait déjà à une
+        // série (la cascade tout en bas doit s'appliquer) d'une conversion en récurrent qui a
+        // lieu dans CETTE édition (ses occurrences sœurs sont générées juste en dessous déjà à
+        // jour avec les valeurs saisies ici — voir fabriquerOccurrence — une cascade y serait
+        // sans effet mais redondante).
+        var appartenaitDejaASerie = !!t.recurrenceId;
         t.type=type; t.montant=montant; t.categorie=categorie; t.description=description; t.date=date; t.typePaiement=typePaiement; t.compteVirement=compteVirementChoisi; t.miroirDepuis=miroirDepuisChoisi;
-        // Une série récurrente représente une seule et même charge/recette dans le temps : si sa
-        // catégorie est corrigée sur une occurrence (ex. reclasser un abonnement mal catégorisé),
-        // toutes les autres occurrences de la série (passées et futures, même recurrenceId) doivent
-        // suivre — sinon la même charge se retrouve éclatée entre deux catégories dans Répartition.
-        if(t.recurrenceId && categorie!==categoriePrecedente){
-          state.transactions.forEach(function(autre){
-            if(autre.recurrenceId===t.recurrenceId && autre.id!==t.id) autre.categorie = categorie;
-          });
-        }
         // Répercute sur l'écriture miroir existante (montant/date/sens), la recrée si le virement
         // change de compte, la retire si ce n'est plus un virement, ou en crée une si le compte
         // d'épargne vient tout juste d'être choisi (édition manuelle : pas de restriction de date
@@ -2941,6 +2972,7 @@
         // échéances passées entre cette date et aujourd'hui sont générées au même titre que les
         // futures, et impactent donc immédiatement le solde puisqu'elles ne sont plus à venir.
         var frequenceConv = t.recurrenceId ? 'aucune' : document.getElementById('input-recurrence').value;
+        var messageToast;
         if(frequenceConv !== 'aucune'){
           t.recurrent = true;
           t.recurrenceId = t.id;
@@ -2953,21 +2985,23 @@
           var detail = [];
           if(nbPassees>0) detail.push(nbPassees+' passée(s)');
           if(nbFutures>0) detail.push(nbFutures+' à venir');
-          toast('Transformé en récurrent' + (detail.length ? (' — '+detail.join(' + ')+' générée(s)') : ''));
+          messageToast = 'Transformé en récurrent' + (detail.length ? (' — '+detail.join(' + ')+' générée(s)') : '');
         } else {
-          toast('Mouvement modifié');
+          messageToast = 'Mouvement modifié';
         }
-        // Une série récurrente doit avoir un seuil « Miroir à partir de » cohérent sur toute sa
-        // longueur : propage ce champ à toutes ses occurrences (existantes ou tout juste générées
-        // par la conversion ci-dessus) et recrée/retire les écritures miroir en conséquence. Ne
-        // s'applique que si un compte d'épargne est effectivement choisi ici — retirer le virement
-        // d'UNE occurrence ne doit pas faire disparaître le virement de toute la série.
-        if(t.recurrenceId && compteVirementApres){
-          state.transactions.forEach(function(autre){
-            if(autre.recurrenceId===t.recurrenceId) autre.miroirDepuis = miroirDepuisChoisi;
-          });
-          resynchroniserMiroirsSerie(t.recurrenceId, miroirDepuisChoisi, compteVirementChoisi);
+        // Une série récurrente représente une seule et même charge/recette dans le temps (voir
+        // propagerModificationSerie, juste au-dessus de ce bloc de code) : si l'occurrence éditée
+        // appartenait déjà à une série AVANT cette édition, tout champ modifié ici (catégorie,
+        // montant, description, type, type de paiement, compte de virement, seuil « Miroir à
+        // partir de »…) se répercute sur ses occurrences sœurs À VENIR (même recurrenceId, jamais
+        // les occurrences déjà passées — voir le commentaire de la fonction) et leurs écritures
+        // miroir respectives — sinon la même charge se retrouve éclatée en versions incohérentes
+        // dans Répartition/Optimisation.
+        if(appartenaitDejaASerie){
+          var nbPropagees = propagerModificationSerie(t);
+          if(nbPropagees>0) messageToast += ' + '+nbPropagees+' occurrence(s) à venir mise(s) à jour';
         }
+        toast(messageToast);
       }
     } else {
       var frequence = document.getElementById('input-recurrence').value;
