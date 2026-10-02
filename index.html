@@ -1150,18 +1150,60 @@
   // être couvert par un relevé CSV importé dans le compte, un miroir rétroactif le compterait
   // deux fois. Une échéance qui a déjà son miroir n'est jamais retouchée ni dupliquée.
   function rattacherVirementsRecurrentsAuxComptes(){
+    return reparerMiroirsComptes();
+  }
+  // Réparation idempotente du lien Courant <-> comptes d'épargne pour le MOIS COURANT ET À VENIR
+  // (les mois écoulés ne sont jamais retouchés : ils peuvent être couverts par un relevé CSV).
+  // Appelée au démarrage, après un import/une restauration ET à chaque render() : le solde et le
+  // « Fin de mois » d'un compte d'épargne tiennent ainsi compte des virements du mois, ponctuels
+  // comme programmés (récurrents), quel que soit le chemin qui les a créés. Trois cas :
+  // 1) écriture miroir orpheline (virement supprimé côté Courant, ex. doublon retiré par
+  //    dedupliquerRecurrences) ou en double : retirée, sinon elle fausse le solde du compte ;
+  // 2) virement Courant lié à un compte (compteVirement) sans miroir dans CE compte — ponctuel
+  //    comme récurrent (seules les séries étaient rattachées avant) : miroir créé ;
+  // 3) garde-fou anti double comptage : si le compte contient déjà une ligne non reliée de même
+  //    date, sens et montant (typiquement importée depuis son relevé CSV), le virement est
+  //    considéré comme déjà couvert et aucun miroir n'est ajouté.
+  // Retourne le nombre de modifications (créations + retraits).
+  function reparerMiroirsComptes(){
     var debut = debutMoisISO();
-    var crees = 0;
-    state.transactions.forEach(function(t){
-      if(!t.recurrenceId || !t.compteVirement || t.date < debut) return;
-      if(!getCompte(t.compteVirement)) return;
-      var seuil = (typeof t.miroirDepuis === 'undefined') ? DATE_DEBUT_MIROIR_VIREMENTS_RECURRENTS : (t.miroirDepuis || t.date);
-      if(t.date < seuil) return;
-      if(t.miroirId && trouverMiroir(t.miroirId, t.id)) return;
-      creerMiroirVirement(t);
-      crees++;
+    var modifs = 0;
+    var sourcesConnues = {};
+    state.transactions.forEach(function(t){ if(t.miroirId) sourcesConnues[t.miroirId] = true; });
+    state.archives.forEach(function(a){ (a.transactions||[]).forEach(function(t){ if(t.miroirId) sourcesConnues[t.miroirId] = true; }); });
+    state.comptes.forEach(function(c){
+      var vus = {};
+      var avant = (c.transactions||[]).length;
+      c.transactions = (c.transactions||[]).filter(function(m){
+        if(!m.miroirId || m.date < debut) return true;
+        if(!sourcesConnues[m.miroirId] || vus[m.miroirId]) return false;
+        vus[m.miroirId] = true;
+        return true;
+      });
+      modifs += avant - c.transactions.length;
     });
-    return crees;
+    state.transactions.forEach(function(t){
+      if(!t.compteVirement || t.date < debut) return;
+      var compte = getCompte(t.compteVirement);
+      if(!compte) return;
+      if(t.recurrenceId){
+        var seuil = (typeof t.miroirDepuis === 'undefined') ? DATE_DEBUT_MIROIR_VIREMENTS_RECURRENTS : (t.miroirDepuis || t.date);
+        if(t.date < seuil) return;
+      }
+      var lignes = compte.transactions || [];
+      if(t.miroirId && lignes.some(function(x){ return x.miroirId===t.miroirId; })) return;
+      var typeMiroir = t.type==='sortie' ? 'entree' : 'sortie';
+      var dejaCouvert = lignes.some(function(x){ return !x.miroirId && x.date===t.date && x.type===typeMiroir && Math.abs(x.montant - t.montant) < 0.005; });
+      if(dejaCouvert) return;
+      if(t.miroirId){
+        // Miroir resté sur un AUTRE compte (cible modifiée) : retiré avant de recréer au bon endroit.
+        state.comptes.forEach(function(c2){ if(c2!==compte) c2.transactions = (c2.transactions||[]).filter(function(x){ return x.miroirId!==t.miroirId; }); });
+        t.miroirId = null;
+      }
+      creerMiroirVirement(t);
+      modifs++;
+    });
+    return modifs;
   }
   // Migration ponctuelle et idempotente : ajoute la catégorie « Intéressement », côté sortie (pour
   // la fusionner avec « Épargne » dans le plan d'optimisation, voir planOptimisation) et côté entrée
@@ -1282,7 +1324,13 @@
     else if(vueActive==='optimisation') renderOptimisation();
     else if(vueActive==='reglages') renderReglages();
   }
-  function render(){ renderVueActive(); }
+  function render(){
+    // Chaque rendu garantit d'abord la cohérence Courant <-> comptes d'épargne (voir
+    // reparerMiroirsComptes) : un virement du mois, ponctuel ou programmé, est toujours reflété
+    // dans le solde et le « Fin de mois » du compte concerné.
+    if(reparerMiroirsComptes() > 0) sauvegarder();
+    renderVueActive();
+  }
 
   // ---------- Rendu : liste de mouvements (partagé) ----------
   function renderListeMouvements(txs, masquerAVenir, videTitre, videSous){
