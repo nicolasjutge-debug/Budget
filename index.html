@@ -1152,11 +1152,65 @@
   function rattacherVirementsRecurrentsAuxComptes(){
     return reparerMiroirsComptes();
   }
+  // Réparation idempotente des virements dont le COMPTE CIBLE N'EXISTE PLUS. Quand un compte
+  // d'épargne est supprimé puis recréé (ex. relevé réimporté en « nouveau compte », voir
+  // importerNouveauCompteCSV), il reçoit un nouvel id : les virements déjà saisis — surtout les
+  // échéances pré-générées d'une série récurrente — gardent l'ANCIEN id dans compteVirement, que
+  // getCompte() ne retrouve plus. Aucun miroir ne peut alors être créé : le compte d'épargne ne voit
+  // pas ces virements et son « Fin de mois » est faux (trop bas, parfois même négatif), sans la
+  // moindre erreur visible. Deux sources de vérité, dans cet ordre :
+  // 1) la SÉRIE : on prend comme modèle son occurrence la plus récente encore reliée à un compte
+  //    existant (même logique que restaurerLienVirementSeries) ;
+  // 2) à défaut (virement ponctuel, ou série sans occurrence valide), la CORRESPONDANCE ancien id ->
+  //    compte actuel observée dans les séries, uniquement si elle est sans ambiguïté (un seul compte).
+  // Seuls le MOIS COURANT ET À VENIR sont rattachés : les mois écoulés ne sont jamais retouchés (ils
+  // peuvent être couverts par un relevé CSV importé dans le compte). Sans effet quand tout est déjà
+  // relié. Retourne la liste des transactions rattachées ; leurs miroirs sont créés juste après par
+  // reparerMiroirsComptes.
+  function relierVirementsAuxComptesActuels(){
+    var debut = debutMoisISO();
+    var series = {};
+    var modeles = {};
+    state.transactions.forEach(function(t){
+      if(!t.recurrenceId) return;
+      (series[t.recurrenceId] = series[t.recurrenceId] || []).push(t);
+      if(t.compteVirement && getCompte(t.compteVirement) && (!modeles[t.recurrenceId] || t.date > modeles[t.recurrenceId].date)) modeles[t.recurrenceId] = t;
+    });
+    var correspondances = {};
+    Object.keys(series).forEach(function(rid){
+      var modele = modeles[rid];
+      if(!modele) return;
+      series[rid].forEach(function(t){
+        if(!t.compteVirement || getCompte(t.compteVirement)) return;
+        var vers = correspondances[t.compteVirement] = correspondances[t.compteVirement] || {};
+        vers[modele.compteVirement] = true;
+      });
+    });
+    var reliees = [];
+    state.transactions.forEach(function(t){
+      if(!t.compteVirement || t.date < debut || getCompte(t.compteVirement)) return;
+      var modele = t.recurrenceId ? modeles[t.recurrenceId] : null;
+      if(modele && modele.type !== t.type) modele = null;
+      var cible = modele ? modele.compteVirement : null;
+      if(!cible){
+        var candidats = Object.keys(correspondances[t.compteVirement] || {});
+        if(candidats.length === 1) cible = candidats[0];
+      }
+      if(!cible) return;
+      t.compteVirement = cible;
+      if(!t.typePaiement) t.typePaiement = 'virement';
+      if(modele) t.miroirDepuis = modele.miroirDepuis; // seuil identique sur toute la série (voir propagerModificationSerie)
+      reliees.push(t);
+    });
+    return reliees;
+  }
   // Réparation idempotente du lien Courant <-> comptes d'épargne pour le MOIS COURANT ET À VENIR
   // (les mois écoulés ne sont jamais retouchés : ils peuvent être couverts par un relevé CSV).
   // Appelée au démarrage, après un import/une restauration ET à chaque render() : le solde et le
   // « Fin de mois » d'un compte d'épargne tiennent ainsi compte des virements du mois, ponctuels
-  // comme programmés (récurrents), quel que soit le chemin qui les a créés. Trois cas :
+  // comme programmés (récurrents), quel que soit le chemin qui les a créés. Quatre cas :
+  // 0) virement Courant dont le compte cible a disparu (ancien id, voir
+  //    relierVirementsAuxComptesActuels) : rattaché au compte actuel, puis traité comme le cas 2 ;
   // 1) écriture miroir orpheline (virement supprimé côté Courant, ex. doublon retiré par
   //    dedupliquerRecurrences) ou en double : retirée, sinon elle fausse le solde du compte ;
   // 2) virement Courant lié à un compte (compteVirement) sans miroir dans CE compte — ponctuel
@@ -1164,10 +1218,13 @@
   // 3) garde-fou anti double comptage : si le compte contient déjà une ligne non reliée de même
   //    date, sens et montant (typiquement importée depuis son relevé CSV), le virement est
   //    considéré comme déjà couvert et aucun miroir n'est ajouté.
-  // Retourne le nombre de modifications (créations + retraits).
+  // Retourne le nombre de modifications (retraits + virements rattachés ou dotés d'un miroir, chaque
+  // virement n'étant compté qu'une fois).
   function reparerMiroirsComptes(){
     var debut = debutMoisISO();
     var modifs = 0;
+    var touches = {};
+    relierVirementsAuxComptesActuels().forEach(function(t){ touches[t.id] = true; });
     var sourcesConnues = {};
     state.transactions.forEach(function(t){ if(t.miroirId) sourcesConnues[t.miroirId] = true; });
     state.archives.forEach(function(a){ (a.transactions||[]).forEach(function(t){ if(t.miroirId) sourcesConnues[t.miroirId] = true; }); });
@@ -1201,9 +1258,9 @@
         t.miroirId = null;
       }
       creerMiroirVirement(t);
-      modifs++;
+      touches[t.id] = true;
     });
-    return modifs;
+    return modifs + Object.keys(touches).length;
   }
   // Migration ponctuelle et idempotente : ajoute la catégorie « Intéressement », côté sortie (pour
   // la fusionner avec « Épargne » dans le plan d'optimisation, voir planOptimisation) et côté entrée
