@@ -497,6 +497,13 @@
     var now = new Date();
     return dateLocaleISO(new Date(now.getFullYear(), now.getMonth()+1, 0));
   }
+  // Date (YYYY-MM-DD) du premier jour du mois courant — borne basse du rattachement des virements
+  // récurrents aux comptes d'épargne (voir rattacherVirementsRecurrentsAuxComptes) : les mois
+  // déjà écoulés ne sont jamais retouchés (ils peuvent être couverts par un relevé CSV importé).
+  function debutMoisISO(){
+    var now = new Date();
+    return dateLocaleISO(new Date(now.getFullYear(), now.getMonth(), 1));
+  }
   // Nombre de jours calendaires entre aujourd'hui et une date (YYYY-MM-DD) donnée — comparaison à
   // minuit des deux dates (pas d'écart en heures/minutes). Utilisé pour ne signaler un découvert
   // prévu qu'à l'approche de l'échéance (voir renderDashboard) plutôt que dès sa détection, parfois
@@ -1034,9 +1041,17 @@
       var derniere = occs.reduce(function(a,b){ return a.date > b.date ? a : b; });
       if(anneeDe(derniere) >= anneeActuelle) return; // déjà à jour
       var freq = derniere.recurrenceFrequence;
+      // typePaiement / compteVirement / miroirDepuis doivent être recopiés comme tous les autres
+      // champs de la série (voir fabriquerOccurrence) : sans eux, les échéances rattrapées d'un
+      // virement vers un compte d'épargne perdaient leur lien avec ce compte — donc aucun miroir
+      // créé (voir ajouterSiAbsente) et un solde de compte d'épargne trop bas en fin de mois.
+      // miroirDepuis reste volontairement undefined pour une série qui n'en a jamais eu (seuil
+      // historique appliqué plus bas), à distinguer d'une chaîne vide (« dès le début »).
       var base = {
         type: derniere.type, montant: derniere.montant, categorie: derniere.categorie,
-        description: derniere.description, recurrenceId: rid, recurrenceFrequence: freq
+        description: derniere.description, typePaiement: derniere.typePaiement,
+        compteVirement: derniere.compteVirement, miroirDepuis: derniere.miroirDepuis,
+        recurrenceId: rid, recurrenceFrequence: freq
       };
       if(freq === 'hebdomadaire'){
         var curseurH = new Date(derniere.date+'T00:00:00');
@@ -1092,6 +1107,61 @@
       migrees++;
     });
     return migrees;
+  }
+  // Réparation idempotente, à lancer AVANT synchroniserRecurrences : les échéances d'une série de
+  // virements générées par l'ancien rattrapage de démarrage ont perdu typePaiement, compteVirement
+  // et miroirDepuis (voir le commentaire de synchroniserRecurrences). Pour chaque série, on prend
+  // comme modèle son occurrence la plus récente qui a encore un compte d'épargne valide, et on
+  // recopie ces trois champs sur les échéances du MOIS COURANT ET À VENIR qui les ont perdus.
+  // Les mois écoulés ne sont jamais réécrits (même règle que propagerModificationSerie). Ne touche
+  // à rien si aucune occurrence n'a perdu son lien : un appel à chaque démarrage est sans effet.
+  function restaurerLienVirementSeries(){
+    var debut = debutMoisISO();
+    var series = {};
+    state.transactions.forEach(function(t){
+      if(!t.recurrenceId) return;
+      (series[t.recurrenceId] = series[t.recurrenceId] || []).push(t);
+    });
+    var restaurees = 0;
+    Object.keys(series).forEach(function(rid){
+      var modele = null;
+      series[rid].forEach(function(t){
+        if(!t.compteVirement || !getCompte(t.compteVirement)) return;
+        if(!modele || t.date > modele.date) modele = t;
+      });
+      if(!modele) return;
+      series[rid].forEach(function(t){
+        if(t.date < debut || t.compteVirement || t.typePaiement || t.type !== modele.type) return;
+        t.typePaiement = modele.typePaiement;
+        t.compteVirement = modele.compteVirement;
+        t.miroirDepuis = modele.miroirDepuis;
+        restaurees++;
+      });
+    });
+    return restaurees;
+  }
+  // Réparation idempotente, à lancer APRÈS synchroniserRecurrences : crée l'écriture miroir (voir
+  // creerMiroirVirement) des échéances de virements récurrents vers/depuis un compte d'épargne qui
+  // n'en ont pas, pour que le solde du compte — y compris son solde de fin de mois — tienne compte
+  // des virements du mois. Cas typique : une série antérieure à la fonction miroir, dont la
+  // migration vers compteVirement (voir migrerVirementsVersNouveauChamp) n'a jamais créé de miroir.
+  // Même seuil que partout ailleurs (« Miroir à partir de », ou le 1er septembre 2026 pour une
+  // série qui n'en a jamais eu), et uniquement à partir du mois courant : un mois déjà écoulé a pu
+  // être couvert par un relevé CSV importé dans le compte, un miroir rétroactif le compterait
+  // deux fois. Une échéance qui a déjà son miroir n'est jamais retouchée ni dupliquée.
+  function rattacherVirementsRecurrentsAuxComptes(){
+    var debut = debutMoisISO();
+    var crees = 0;
+    state.transactions.forEach(function(t){
+      if(!t.recurrenceId || !t.compteVirement || t.date < debut) return;
+      if(!getCompte(t.compteVirement)) return;
+      var seuil = (typeof t.miroirDepuis === 'undefined') ? DATE_DEBUT_MIROIR_VIREMENTS_RECURRENTS : (t.miroirDepuis || t.date);
+      if(t.date < seuil) return;
+      if(t.miroirId && trouverMiroir(t.miroirId, t.id)) return;
+      creerMiroirVirement(t);
+      crees++;
+    });
+    return crees;
   }
   // Migration ponctuelle et idempotente : ajoute la catégorie « Intéressement », côté sortie (pour
   // la fusionner avec « Épargne » dans le plan d'optimisation, voir planOptimisation) et côté entrée
@@ -2126,6 +2196,10 @@
         state.archives = Array.isArray(data.archives) ? data.archives : [];
         state.comptes = Array.isArray(data.comptes) ? data.comptes : [];
         state.categoriesSupprimees = Array.isArray(data.categoriesSupprimees) ? data.categoriesSupprimees : [];
+        // Mêmes réparations idempotentes qu'au démarrage (voir init) : une sauvegarde plus ancienne
+        // peut contenir des virements du mois sans écriture miroir sur le compte d'épargne.
+        restaurerLienVirementSeries();
+        rattacherVirementsRecurrentsAuxComptes();
         sauvegarder();
         render();
         toast('Import réussi');
@@ -2375,6 +2449,9 @@
       if(typeof recu.soldeInitial === 'number') state.soldeInitial = recu.soldeInitial;
       if(Array.isArray(recu.comptes)) state.comptes = recu.comptes;
       if(Array.isArray(recu.categoriesSupprimees)) state.categoriesSupprimees = recu.categoriesSupprimees;
+      // Mêmes réparations idempotentes qu'au démarrage (voir init et importerJSON).
+      restaurerLienVirementSeries();
+      rattacherVirementsRecurrentsAuxComptes();
       sauvegarder();
       render();
       toast('Données récupérées depuis le cloud');
@@ -2979,6 +3056,16 @@
           t.recurrenceFrequence = frequenceConv;
           var occConv = genererOccurrencesRecurrentes(t, frequenceConv);
           state.transactions = state.transactions.concat(occConv);
+          // Virement vers/depuis un compte d'épargne : comme à la création d'une série (voir plus
+          // bas), chaque échéance générée a aussi besoin de son écriture miroir — sinon seule la
+          // première occurrence (traitée plus haut) est reflétée sur le compte d'épargne, et ses
+          // échéances suivantes (donc celles du mois en cours) manquent à son solde de fin de mois.
+          if(compteVirementApres){
+            var seuilMiroirConv = miroirDepuisChoisi || t.date;
+            occConv.forEach(function(occ){
+              if(occ.date >= seuilMiroirConv) creerMiroirVirement(occ);
+            });
+          }
           var aujourdhuiConv = dateLocaleISO();
           var nbPassees = occConv.filter(function(o){ return o.date <= aujourdhuiConv; }).length;
           var nbFutures = occConv.length - nbPassees;
@@ -3114,14 +3201,17 @@
     chargerDonnees().then(function(){
       var nbMigrees = migrerVirementsVersNouveauChamp();
       var nbSupprimees = dedupliquerRecurrences();
+      var nbLiensRestaures = restaurerLienVirementSeries();
       var nbAjoutees = synchroniserRecurrences();
+      var nbRattaches = rattacherVirementsRecurrentsAuxComptes();
       var categorieInteressementAjoutee = ajouterCategorieInteressementSiAbsente();
-      if(nbMigrees>0 || nbSupprimees>0 || nbAjoutees>0 || categorieInteressementAjoutee) sauvegarder();
+      if(nbMigrees>0 || nbSupprimees>0 || nbLiensRestaures>0 || nbAjoutees>0 || nbRattaches>0 || categorieInteressementAjoutee) sauvegarder();
       demarrer();
       var decouvert = projeterDecouvert();
       // Même seuil (SEUIL_JOURS_ALERTE_DECOUVERT) que sur le Dashboard (voir renderDashboard) : évite
       // un toast au lancement pour une échéance encore lointaine et pas actionnable dans l'immédiat.
       if(decouvert && joursAvant(decouvert.date) <= SEUIL_JOURS_ALERTE_DECOUVERT) toast('⚠ Découvert prévu le '+formatDateAffichage(decouvert.date)+' ('+formatMontant(decouvert.solde)+')');
+      else if(nbRattaches>0) toast(nbRattaches+' virement(s) rattaché(s) à vos comptes d\'épargne');
     }).catch(function(e){
       console.error('Erreur au chargement', e);
       demarrer();
